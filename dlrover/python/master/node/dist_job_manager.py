@@ -72,6 +72,7 @@ from dlrover.python.master.watcher.factory import (
 )
 from dlrover.python.scheduler.factory import new_elastic_job
 from dlrover.python.scheduler.job import ElasticJob, JobArgs
+from dlrover.python.master.dragonfly.dragonfly_topo import DragonflyTopoManager
 
 _dlrover_context = Context.singleton_instance()
 
@@ -162,6 +163,8 @@ class DistributedJobManager(JobManager):
         )
         self._scaler: Scaler = job_scaler
         self._init_training_node_manager()
+        self._topo_manager = DragonflyTopoManager.singleton_instance(job_args.namespace)
+        self._enable_dragonfly = self._topo_manager.dragonfly_enable()
 
     def start(self):
         self._scaler.start()
@@ -618,7 +621,17 @@ class DistributedJobManager(JobManager):
         logger.info(msg)
 
         if should_relaunch:
-            self._relaunch_node(cur_node)
+            if self._enable_dragonfly:
+                self._relaunch_group_node(cur_node)
+            else:
+                self._relaunch_node(cur_node)
+        # remove the node group if node can't be relauchable
+        elif (
+            cur_node.relaunchable
+            and status_change_flow.should_relaunch
+            and self._enable_dragonfly
+        ):
+            self._remove_group_node(cur_node)
 
     def _process_node_events(
         self, status_change_flow: NodeStateFlow, node: Node
@@ -717,6 +730,66 @@ class DistributedJobManager(JobManager):
             plan.remove_nodes.append(node)
         node.relaunchable = False  # Avoid repeatedly relaunching the node.
         self._scaler.scale(plan)
+
+    def _get_node_group(self, node: Node) -> List[Node]:
+        id = node.id
+        node_group: List[Node] = []
+
+        groups = self._topo_manager.get_groups(node.id)
+        for id in groups:
+            node_group.append(self._job_nodes[node.type][id])
+        return node_group
+
+    def _relaunch_group_node(self, fault_node: Node):
+        node_group: List[Node] = self._get_node_group(fault_node)
+        self._relaunch_nodes(fault_node, node_group)
+
+    def _relaunch_nodes(self, fault_node: Node, nodes: List[Node]):
+        final_plan = ScalePlan()
+        for node in nodes:
+            plan = ScalePlan()
+            if node.type == NodeType.WORKER:
+                plan = self._worker_manager.relaunch_node(
+                    node, self._remove_exited_node
+                )
+            elif node.type == NodeType.PS:
+                plan = self._ps_manager.relaunch_node(
+                    node, self._remove_exited_node
+                )
+            elif node.type == NodeType.EVALUATOR:
+                plan = self._evaluator_manager.relaunch_node(
+                    node, self._remove_exited_node
+                )
+            elif node.type == NodeType.CHIEF or node.type == NodeType.MASTER:
+                plan = self._chief_manager.relaunch_node(
+                    node, self._remove_exited_node
+                )
+            else:
+                logger.error("Not support node type %s", node.type)
+            if (
+                (not node.exited() and not (node is fault_node))
+                or self._remove_exited_node
+            ):
+                plan.remove_nodes.append(node)
+            final_plan.merge(plan)
+            node.relaunchable = False  # Avoid repeatedly relaunching the node.
+        self._set_ps_addrs_in_plan(final_plan)
+        self._scaler.scale(final_plan)
+
+    def _remove_group_node(self, fault_node: Node):
+        node_group: List[Node] = self._get_node_group(fault_node)
+        final_plan = ScalePlan()
+        for node in node_group:
+            plan = ScalePlan()
+            if (
+                (not node.exited() and not (node is fault_node))
+                or self._remove_exited_node
+            ):
+                plan.remove_nodes.append(node)
+            final_plan.merge(plan)
+            node.relaunchable = False  # Avoid repeatedly relaunching the node.
+        self._set_ps_addrs_in_plan(final_plan)
+        self._scaler.scale(final_plan)
 
     def clear_exited_nodes(self):
         if not self._remove_exited_node:
@@ -927,11 +1000,22 @@ class DistributedJobManager(JobManager):
         if node.is_released:
             logger.info(f"The node {node.name} has been released.")
             return
-        reluanch_node = self._error_monitor.process_error(
+        relaunch_node = self._error_monitor.process_error(
             node, restart_count, error_data, level
         )
-        if reluanch_node and node.relaunchable:
-            self._relaunch_node(node)
+        if relaunch_node and node.relaunchable:
+            if self._enable_dragonfly:
+                if level == TrainingExceptionLevel.NODE_ERROR:
+                    node_group: List[Node] = self._get_node_group(node)
+                    for member in node_group:
+                        if node != member:
+                            self._error_monitor.process_error(
+                                member, -1, "group err",
+                                TrainingExceptionLevel.NODE_ERROR,
+                            )
+                self._relaunch_nodes(node, node_group)
+            else:
+                self._relaunch_node(node)
 
     def update_allreduce_node_unit(self, node_unit):
         if isinstance(self._job_optimizer, AllreduceJobResourceOptimizer):
