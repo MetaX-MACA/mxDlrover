@@ -36,6 +36,7 @@ from dlrover.python.common.global_context import Context
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node, NodeResource
 from dlrover.python.master.scaler.base_scaler import ScalePlan, Scaler
+from dlrover.python.master.dragonfly.dragonfly_topo import DragonflyTopoManager
 from dlrover.python.scheduler.kubernetes import (
     NODE_SERVICE_PORTS,
     convert_cpu_to_decimal,
@@ -87,6 +88,7 @@ class PodScaler(Scaler):
     def __init__(self, job_name, namespace):
         super(PodScaler, self).__init__(job_name)
         self._k8s_client = k8sClient.singleton_instance(namespace)
+        self._topo_manager = DragonflyTopoManager.singleton_instance(namespace)
         self._svc_factory = k8sServiceFactory(namespace, job_name)
         self._namespace = namespace
         self._replica_template: Dict[str, client.V1Pod] = {}
@@ -502,6 +504,13 @@ class PodScaler(Scaler):
             "app": ElasticJobLabel.APP_NAME,
             ElasticJobLabel.JOB_KEY: self._job_name,
         }
+
+        dragon_affinity = None
+        if self._topo_manager.dragonfly_enable():
+            dragon_affinity = self._topo_manager.generate_affinity(self._job_name, node.rank_index)
+            dragon_labels = self._topo_manager.generate_label(self._job_name, node.rank_index)
+            labels.update(dragon_labels)
+
         pod = self._create_pod_obj(
             name=pod_name,
             pod_template=pod_template,
@@ -510,6 +519,7 @@ class PodScaler(Scaler):
             priority=node.config_resource.priority,
             env=env,
             lifecycle=None,
+            affinity=dragon_affinity,
             labels=labels,
         )
         pod_meta: client.V1ObjectMeta = pod.metadata
@@ -617,6 +627,7 @@ class PodScaler(Scaler):
         env,
         priority,
         labels,
+        affinity,
         termination_period=None,
     ):
         pod = copy.deepcopy(pod_template)
@@ -637,6 +648,28 @@ class PodScaler(Scaler):
         pod.spec.priority_class_name = priority
         pod.spec.restart_policy = "Never"
         pod.spec.termination_grace_period_seconds = termination_period
+        
+        '''
+        add pod_affinity and pod_anti_affinity for pod
+        only consider 'required_during_scheduling_ignored_during_execution'
+        '''
+        if affinity is not None:
+            if not pod.spec.affinity:
+                pod.spec.affinity = affinity
+            else:
+                if not pod.spec.affinity.pod_affinity:
+                    pod.spec.affinity.pod_affinity = affinity.pod_affinity
+                else:
+                    pod.spec.affinity.pod_affinity.required_during_scheduling_ignored_during_execution.append(
+                        affinity.pod_affinity.required_during_scheduling_ignored_during_execution
+                    )
+                
+                if not pod.spec.affinity.pod_anti_affinity:
+                    pod.spec.affinity.pod_anti_affinity = affinity.pod_anti_affinity
+                else:
+                    pod.spec.affinity.pod_anti_affinity.required_during_scheduling_ignored_during_execution.append(
+                        affinity.pod_anti_affinity.required_during_scheduling_ignored_during_execution
+                    )
 
         if not pod.metadata:
             pod.metadata = client.V1ObjectMeta(

@@ -1,5 +1,17 @@
 apiVersion: v1
 data:
+  dragonfly_enable: "true"  # Controls whether dlrover enables dragonfly func
+  dragonfly_per_group_num: "2"  # Number of nodes per group in the dragonfly topology
+  dragonfly_topo_key: "metax-tech.com/topology.nodegroup" # The k8s label key used to identify the dragonfly topological relationship
+kind: ConfigMap
+metadata:
+  name: dragonfly-config
+  namespace: dlrover
+
+---
+
+apiVersion: v1
+data:
   controller_manager_config.yaml: |
     apiVersion: controller-runtime.sigs.k8s.io/v1alpha1
     kind: ControllerManagerConfig

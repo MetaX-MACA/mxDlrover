@@ -16,6 +16,8 @@ package master
 import (
 	"context"
 	"fmt"
+	"strconv"
+
 	elasticv1alpha1 "github.com/intelligent-machine-learning/easydl/dlrover/go/operator/api/v1alpha1"
 	common "github.com/intelligent-machine-learning/easydl/dlrover/go/operator/pkg/common"
 	commonv1 "github.com/intelligent-machine-learning/easydl/dlrover/go/operator/pkg/common/api/v1"
@@ -25,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime_client "sigs.k8s.io/controller-runtime/pkg/client"
-	"strconv"
 )
 
 const (
@@ -255,6 +256,32 @@ func NewMasterTemplateToJob(job *elasticv1alpha1.ElasticJob, masterImage string)
 		Spec: corev1.PodSpec{
 			Containers:    []corev1.Container{container},
 			RestartPolicy: corev1.RestartPolicyNever,
+			//assign dlrover-master pod to k8s master node
+			Tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "node-role.kubernetes.io/master",
+										Operator: corev1.NodeSelectorOpExists,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			//Add permissions
+			ServiceAccountName: "dlrover-controller-manager",
 		},
 	}
 	if _, ok := job.Spec.ReplicaSpecs[ReplicaTypeJobMaster]; ok {
