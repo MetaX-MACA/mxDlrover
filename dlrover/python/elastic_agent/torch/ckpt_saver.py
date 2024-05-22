@@ -1259,6 +1259,61 @@ class DeepSpeedCheckpointSaver(CommonDirCheckpointSaver):
         )
         self.storage.write(str(step), ds_tracker_filename)
 
+class ColossalAICheckpointSaver(CommonDirCheckpointSaver):
+    TRACER_FILE = "latest.txt"
+    def update_tracker_file(self, step):
+        """
+        Write the step into the tracker file.
+
+        Args:
+            step (int): the checkpointing step.
+        """
+        tracker_filename = os.path.join(
+            self.checkpoint_dir, CheckpointConstant.TRACER_FILE_NAME
+        )
+        self.storage.write(str(step), tracker_filename)
+        tracker_filename = os.path.join(self.checkpoint_dir, self.TRACER_FILE)
+        self.storage.write(str(step), tracker_filename)
+
+    def persist_to_storage(
+        self,
+        local_shard_id: int,
+        ckpt_config: CheckpointConfig,
+    ):
+        """
+        Persist the state dict to a storage path.
+
+        Args:
+            local_shard_id (int): the index of local shard.
+            ckpt_config : the checkpoint config with the path to
+                save the storage.
+        checkpoint-format:
+        Xxx-step
+		|——Modeling(dp=0, tp=0)
+		|	|——pytorch_model.<prefix>-stage-000XX-shard-000XX.bin
+		|——Optimizer(dp=0, tp=0)
+		|	|——pytorch_optim.<prefix>-stage-000XX-shard-000XX.bin
+		|———Lr(rank=0)
+		|   |——xxx.bin
+		|
+		dlrover_latest.txt
+
+        state_dict-format:
+        {
+            "file-name" : content,
+            "file-name2" : content2,
+        }
+        paths-format:
+        {
+            "file-name" : path1,
+            "file-name2" : path2,
+        }
+        """
+        state_dict = self._shm_handlers[local_shard_id].load_state_dict()
+        paths = ckpt_config.paths
+        for name, sd in state_dict.items():
+            if name in paths:
+                self.storage.write_state_dict(sd, paths[name], torch.save)
 
 class FsdpDcpSaver(CommonDirCheckpointSaver):
     """The saver saves the distributed checkpoint of FSDP into the storage."""

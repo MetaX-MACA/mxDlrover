@@ -163,6 +163,7 @@ class CheckpointEngine(metaclass=ABCMeta):
         comm_backend: str = "",
         save_timeout: int = CheckpointConstant.SAVE_TIMEOUT,
         replica_count=0,
+        local_shard_id = -1,
     ):
         logger.info(
             "Initializing checkpoint engine: "
@@ -194,7 +195,7 @@ class CheckpointEngine(metaclass=ABCMeta):
 
         # lock for shared memory
         local_shard_num = self.get_local_shard_num()
-        self.local_shard_id = self._local_rank % local_shard_num
+        self.local_shard_id = self._local_rank % local_shard_num if local_shard_id == -1 else local_shard_id
         lock_name = CheckpointSharedObjPrefix.SHM_LOCK_NAME + str(
             self.local_shard_id
         )
@@ -327,7 +328,7 @@ class CheckpointEngine(metaclass=ABCMeta):
 
     def save_state_dict_to_memory(self, state_dict, conf: CheckpointConfig):
         """Save the state dict into the memory."""
-        if self._local_rank != self.local_shard_id:
+        if self._saving_ranks is None and self._local_rank != self.local_shard_id:
             return False
         if self._saving_ranks and self._rank not in self._saving_ranks:
             return False
