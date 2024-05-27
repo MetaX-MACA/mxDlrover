@@ -4,7 +4,7 @@ metadata:
   labels:
     control-plane: controller-manager
   name: dlrover-controller-manager
-  namespace: dlrover
+  namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
@@ -17,6 +17,14 @@ spec:
       labels:
         control-plane: controller-manager
     spec:
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - args:
         - --secure-listen-address=0.0.0.0:8443
@@ -45,10 +53,10 @@ spec:
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=127.0.0.1:8080
         - --leader-elect
-        - --master-image=registry.cn-hangzhou.aliyuncs.com/intell-ai/dlrover:master
+        - --master-image={{ .Values.dlroverMaster.registry | default .Values.registry }}/{{ .Values.dlroverMaster.image.name }}:{{ .Values.dlroverMaster.image.tag | default .Chart.Version}}
         command:
         - /manager
-        image: easydl/elasticjob-controller:master
+        image: "{{ .Values.controller.registry | default .Values.registry }}/{{ .Values.controller.image.name }}:{{ .Values.controller.image.tag | default .Chart.Version}}"
         imagePullPolicy: Always
         livenessProbe:
           httpGet:

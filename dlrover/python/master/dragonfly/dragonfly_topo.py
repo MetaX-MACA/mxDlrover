@@ -37,8 +37,8 @@ class DragonflyTopoManager(Singleton):
 
         self._k8s_client = k8sClient.singleton_instance(namespace)
         try:
-            configmap = self._k8s_client.get_configmap("dragonfly-config")
-            logger.info("configmap Dragonfly Data:")
+            configmap = self._k8s_client.get_configmap("group-scheduler-config")
+            logger.info("configmap group-scheduler-config Data:")
             for key, value in configmap.data.items():
                 logger.info(f"{key}:{value}")
 
@@ -47,9 +47,9 @@ class DragonflyTopoManager(Singleton):
             logger.error("Failed to get configmap, reason: {e}\n")
 
     def _init_dragonfly_parm(self, configmap):
-        self._dragonfly_enable = strtobool(configmap.data.get("dragonfly_enable", "False"))
-        self._dragonfly_per_group_num = int(configmap.data.get("dragonfly_per_group_num", "1"))
-        self._dragonfly_topo_key = configmap.data.get("dragonfly_topo_key", "")
+        self._dragonfly_enable = strtobool(configmap.data.get("enable", "False"))
+        self._dragonfly_per_group_num = int(configmap.data.get("per_group_num", "1"))
+        self._dragonfly_topo_key = configmap.data.get("topo_key", "")
     
     def dragonfly_enable(self):
         """

@@ -1,0 +1,30 @@
+# Default values for dlrover.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+registry: "mxcr.io/cloud"
+
+# uses to assign pod group to node group
+groupScheduler:
+  enable: true # Controls whether dlrover enables group-scheduler func
+  per_group_num: "2" # Number of nodes per group in the topology
+  topo_key: "metax-tech.com/topology.nodegroup" # The k8s label key used to identify the topological relationship
+    
+controller:
+  image:
+    name: "elasticjob-controller"
+  tolerations:
+  - key: "node-role.kubernetes.io/master"
+    operator: "Exists"
+    effect: "NoSchedule"
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: "node-role.kubernetes.io/master"
+            operator: "Exists"
+
+dlroverMaster:
+  image:
+    name: "dlrover-master"

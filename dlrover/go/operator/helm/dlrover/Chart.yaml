@@ -1,0 +1,7 @@
+apiVersion: v2
+name: dlrover
+description:  A Helm chart for DLrover
+type: application
+
+version: 0.7.11
+appVersion: "1.16.0"
