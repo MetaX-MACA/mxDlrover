@@ -12,6 +12,7 @@ rules:
       - pods/exec
       - service
       - services
+      - configmaps
     verbs:
       - create
       - get

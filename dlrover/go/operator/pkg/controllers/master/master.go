@@ -280,8 +280,6 @@ func NewMasterTemplateToJob(job *elasticv1alpha1.ElasticJob, masterImage string)
 					},
 				},
 			},
-			//Add permissions
-			ServiceAccountName: "dlrover-controller-manager",
 		},
 	}
 	if _, ok := job.Spec.ReplicaSpecs[ReplicaTypeJobMaster]; ok {
