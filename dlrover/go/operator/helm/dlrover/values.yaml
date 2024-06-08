@@ -2,7 +2,7 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-registry: "mxcr.io/cloud"
+registry: "cr.metax-tech.com/cloud"
 
 # uses to assign pod group to node group
 groupScheduler:
