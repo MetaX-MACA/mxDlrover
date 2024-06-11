@@ -57,7 +57,7 @@ spec:
         command:
         - /manager
         image: "{{ .Values.controller.registry | default .Values.registry }}/{{ .Values.controller.image.name }}:{{ .Values.controller.image.tag | default .Chart.Version}}"
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
             path: /healthz

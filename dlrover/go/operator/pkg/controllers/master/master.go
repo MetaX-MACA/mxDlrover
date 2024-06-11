@@ -36,7 +36,7 @@ const (
 	masterCommand              = "python -m dlrover.python.master.main"
 	masterServicePort          = 50001
 	initMasterIndex            = 0
-	defaultImagePullPolicy     = "Always"
+	defaultImagePullPolicy     = "IfNotPresent"
 	envMasterAddrKey           = "DLROVER_MASTER_ADDR"
 	envBrainServiceAddrKey     = "DLROVER_BRAIN_SERVICE_ADDR"
 	envPodIP                   = "POD_IP"
