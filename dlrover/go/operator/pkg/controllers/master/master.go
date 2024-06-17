@@ -263,6 +263,11 @@ func NewMasterTemplateToJob(job *elasticv1alpha1.ElasticJob, masterImage string)
 					Operator: corev1.TolerationOpExists,
 					Effect:   corev1.TaintEffectNoSchedule,
 				},
+				{
+					Key:      "node-role.kubernetes.io/control-plane",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
 			},
 			Affinity: &corev1.Affinity{
 				NodeAffinity: &corev1.NodeAffinity{
@@ -272,6 +277,14 @@ func NewMasterTemplateToJob(job *elasticv1alpha1.ElasticJob, masterImage string)
 								MatchExpressions: []corev1.NodeSelectorRequirement{
 									{
 										Key:      "node-role.kubernetes.io/master",
+										Operator: corev1.NodeSelectorOpExists,
+									},
+								},
+							},
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "node-role.kubernetes.io/control-plane",
 										Operator: corev1.NodeSelectorOpExists,
 									},
 								},
