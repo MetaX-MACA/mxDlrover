@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Union
+import subprocess
 
 import torch
 import torch.distributed.elastic.timer as timer
@@ -550,6 +551,7 @@ class ElasticTrainingAgent(LocalElasticAgent):
         while True:
             try:
                 if self._config.network_check:
+                    run_node_check(self._config, self._entrypoint)
                     run_network_check(self._config, self._entrypoint)
                 super()._initialize_workers(worker_group)
                 # We need to register handler after starting workers because
@@ -1081,6 +1083,43 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
         shutil.rmtree(result_dir, ignore_errors=True)
         return elapsed_time
 
+class NodeCheckAgent(object):
+    """
+    This agent will run to check cards available.
+    """
+
+    def __init__(self):
+        self._client = MasterClient.singleton_instance()
+
+    def _collect_dmesg(self) -> List[str]:
+        # ����dmesg����������
+        dmesg_output = subprocess.run(["dmesg | tail -n 200"], capture_output=True, shell=True, text=True)
+
+        # ��������зָ���б�
+        dmesg_lines  =  dmesg_output.stdout.split('\n')
+        recent_dmesg :List[str] = []
+        for line in dmesg_lines:
+            # ���ÿ��dmesg��Ϣ
+            if "RAS.ALERT Please contact administrator to reset card" in line or \
+                "shader int:deal with the shader exception, err_type:0x1" in line:
+                recent_dmesg.append(line)
+        return recent_dmesg
+
+    def run(self) -> bool:
+        logger.info("NodeCheckAgent run start")
+        success = True
+        dmesg_error = self._collect_dmesg()
+        if len(dmesg_error) != 0:
+            logger.warn(f"Find dmesg error in last 200 line!\n {dmesg_error}")
+            self._client.report_failures(
+                NodeErrorMessage.NETWORKER_ERROR,
+                level=TrainingExceptionLevel.NODE_ERROR,
+            )
+            raise RuntimeError("The node has card error.")
+        logger.info(
+            f"NodeCheckAgent run end {success}"
+        )
+        return success
 
 def _create_check_agent(
     config: ElasticLaunchConfig,
@@ -1202,4 +1241,18 @@ def run_network_check(config: ElasticLaunchConfig, entrypoint):
             )
     if success and config.comm_perf_test:
         comm_perf_check(config=config, entrypoint=entrypoint, args=cmd_args)
+    return success
+
+def run_node_check(config: ElasticLaunchConfig, entrypoint):
+    if not config.accelerator == Accelerators.NVIDIA_GPU:
+        logger.warning(f"Node_check unsupported accelerator chip {config.accelerator}.")
+        return True
+
+    agent = NodeCheckAgent()
+    success = agent.run()
+    if success:
+        logger.info("Node check passed.")
+        return success
+    else:
+        logger.error("Node check fail.")
     return success

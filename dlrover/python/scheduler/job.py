@@ -99,7 +99,7 @@ class JobArgs(JsonSerializable):
         self.resource_limits = ResourceLimits()
         self.relaunch_always = True
         self.remove_exited_node = False
-        self.cordon_fault_node = False
+        self.cordon_fault_node = True
 
     @abstractmethod
     def initilize(self):
