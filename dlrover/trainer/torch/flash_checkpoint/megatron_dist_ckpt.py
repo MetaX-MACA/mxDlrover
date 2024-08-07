@@ -172,6 +172,16 @@ class MegatronDistCheckpointer(Singleton):
                 save_timeout=save_timeout,
             )
 
+def is_chained_optimizer(optimizer) -> bool:
+    try:
+        try:
+            from megatron.core.optimizer import ChainedOptimizer
+        except ImportError:
+            from megatron.optimizer.optimizer import ChainedOptimizer
+        return isinstance(optimizer, ChainedOptimizer)
+    except ImportError:
+        logger.info("ChainedOptimizer is not defined")
+        return False
 
 def save_checkpoint(
     iteration,
@@ -235,7 +245,7 @@ def save_checkpoint(
         and not args.no_save_optim
         and optimizer is not None
     ):
-        if isinstance(optimizer, ChainedOptimizer):
+        if is_chained_optimizer(optimizer):
             dist_opter_state = get_chained_optimizer_parameter_state(optimizer)
         else:
             dist_opter_state = get_parameter_state(optimizer)
@@ -322,7 +332,11 @@ def get_parameter_state(dist_optimizer):
         buffers.
     """
     state = {}
-    for _, gbuf_range_maps in enumerate(dist_optimizer.gbuf_ranges):
+    try:
+        gbuf_ranges = dist_optimizer.gbuf_ranges
+    except AttributeError:
+        gbuf_ranges = dist_optimizer.model_gbuf_ranges
+    for _, gbuf_range_maps in enumerate(gbuf_ranges):
 
         # Iterate grad buffers (by data type).
         assert len(gbuf_range_maps) == 1, "single dtype supported, for now."
@@ -501,15 +515,15 @@ def load_checkpoint(
             # Load state dict.
             if optimizer is not None:
                 optimizer.load_state_dict(model_state_dict["optimizer"])
-            if args.use_distributed_optimizer:
-                if isinstance(optimizer, ChainedOptimizer):
-                    load_chained_optimizer_parameter_state(
-                        optimizer, opt_state_dict
-                    )
-                else:
-                    load_parameter_state_from_state_dict(
-                        optimizer, opt_state_dict
-                    )
+                if args.use_distributed_optimizer:
+                    if is_chained_optimizer(optimizer):
+                        load_chained_optimizer_parameter_state(
+                            optimizer, opt_state_dict
+                        )
+                    else:
+                        load_parameter_state_from_state_dict(
+                            optimizer, opt_state_dict
+                        )
 
             # Load scheduler.
             if opt_param_scheduler is not None:
@@ -657,7 +671,11 @@ def _load_base_checkpoint(load_dir, rank0=False):
 def load_parameter_state_from_state_dict(dist_optimizer, state_dict):
     """Load parameter state (i.e., parameter & optimizer tensors)."""
     # Scatter tensors to all DP ranks.
-    for gbuf_idx, gbuf_range_maps in enumerate(dist_optimizer.gbuf_ranges):
+    try:
+        gbuf_ranges = dist_optimizer.gbuf_ranges
+    except AttributeError:
+        gbuf_ranges = dist_optimizer.model_gbuf_ranges
+    for gbuf_idx, gbuf_range_maps in enumerate(gbuf_ranges):
         for dtype, gbuf_range_map_for_all_buckets in gbuf_range_maps.items():
             for bucket_idx, gbuf_range_map in enumerate(
                 gbuf_range_map_for_all_buckets

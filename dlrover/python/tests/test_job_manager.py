@@ -288,7 +288,7 @@ class DistributedJobManagerTest(unittest.TestCase):
             else:
                 node.create_time = now - timedelta(seconds=1400)
                 node.start_time = now - timedelta(seconds=1200)
-        events = manager._get_dead_node_event()
+        events = manager._get_dead_node_event(window_interval=600)
         self.assertEqual(len(events), 2)
 
         nodes_time_info = manager._get_nodes_time_info()

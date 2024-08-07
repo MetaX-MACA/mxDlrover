@@ -81,6 +81,11 @@ def _get_pod(name):
     )
     return pod
 
+def _get_configmap(name):
+    return client.V1ConfigMap(
+        api_version="v1",
+        data={}
+    )
 
 class MockK8sPSJobArgs(JobArgs):
     def __init__(self):
@@ -313,6 +318,7 @@ def mock_k8s_client():
         return_value=True
     )
     k8s_client.get_service = mock.MagicMock(return_value=False)  # type: ignore
+    k8s_client.get_configmap = _get_configmap
     return k8s_client
 
 
