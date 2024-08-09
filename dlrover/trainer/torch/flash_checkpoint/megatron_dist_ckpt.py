@@ -56,7 +56,6 @@ except ImportError:
             set_checkpoint_version,
             update_num_microbatches,
         )
-        from megatron.optimizer.optimizer import ChainedOptimizer
         from megatron.utils import print_rank_0, unwrap_model
     except ImportError:
         logger.warning("Please check the magatron.checkpointing exists.")
