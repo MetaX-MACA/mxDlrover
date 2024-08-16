@@ -423,15 +423,26 @@ def load_checkpoint(
         opt_state_dict,
         checkpoint_name,
         release,
+        step,
     ) = _load_checkpoint_from_memory(checkpointer)
 
-    if not model_state_dict:
-        (
-            model_state_dict,
-            opt_state_dict,
-            checkpoint_name,
-            release,
-        ) = _load_base_checkpoint(load_dir, rank0=False)
+    (iteration, release,) = _load_iteration_release(load_dir, rank0=False)
+    if iteration == 0:
+        model_state_dict = None
+        opt_state_dict = None
+    else:
+        if not model_state_dict or step != iteration:
+            (
+                model_state_dict,
+                checkpoint_name,
+            ) = _load_model_from_base_checkpoint(
+                load_dir, iteration, release, rank0=False
+            )
+
+        if not opt_state_dict or step != iteration:
+            opt_state_dict = _load_opt_from_base_checkpoint(
+                load_dir, iteration, release, rank0=False
+            )
 
     # Checkpoint not loaded.
     if model_state_dict is None:
@@ -606,14 +617,10 @@ def _load_checkpoint_from_memory(checkpointer):
     opt_state_dict = state_dict.get(CheckpointConstant.OPTIM_STATES_NAME, {})
     checkpoint_name = "iter_{:07d}".format(step)
     release = False
-    return model_state_dict, opt_state_dict, checkpoint_name, release
+    return model_state_dict, opt_state_dict, checkpoint_name, release, step
 
 
-def _load_base_checkpoint(load_dir, rank0=False):
-    """Load the base state_dict from the given directory
-
-    If rank0 is true, just loads rank 0 checkpoint, ignoring arguments.
-    """
+def _load_iteration_release(load_dir, rank0=False):
     # Read the tracker file and set the iteration.
     tracker_filename = get_checkpoint_tracker_filename(load_dir)
 
@@ -621,20 +628,21 @@ def _load_base_checkpoint(load_dir, rank0=False):
     if not os.path.isfile(tracker_filename):
         if not rank0:
             print_rank_0(
-                "WARNING: could not find the metadata file {} ".format(
-                    tracker_filename
-                )
+                "WARNING: could not find the metadata file {} ".format(tracker_filename)
             )
             print_rank_0(
-                "    will not load any checkpoints and will start from "
-                "random"
+                "    will not load any checkpoints and will start from " "random"
             )
-        return None, None, "", False
+        return 0, 0
 
     # Otherwise, read the tracker file and either set the iteration or
     # mark it as a release checkpoint.
     iteration, release = read_metadata(tracker_filename)
+    return iteration, release
 
+
+def _load_model_from_base_checkpoint(load_dir, iteration, release, rank0=False):
+    """Load the base state_dict from the given directory"""
     # Checkpoint.
     if rank0:
         checkpoint_name = find_checkpoint_rank_0(load_dir, iteration, release)
@@ -643,9 +651,26 @@ def _load_base_checkpoint(load_dir, rank0=False):
         if release:
             print_rank_0(f" loading release checkpoint from {load_dir}")
         else:
-            print_rank_0(
-                f" loading checkpoint from {load_dir} at iteration {iteration}"
-            )
+            print_rank_0(f" loading checkpoint from {load_dir} at iteration {iteration}")
+
+    # Load the checkpoint.
+    try:
+        model_state_dict = torch.load(checkpoint_name, map_location="cpu")
+    except BaseException as e:
+        print_rank_0("could not load the checkpoint")
+        print_rank_0(e)
+        sys.exit()
+
+    return model_state_dict, checkpoint_name
+
+
+def _load_opt_from_base_checkpoint(load_dir, iteration, release, rank0=False):
+    """Load the base state_dict from the given directory"""
+    # Checkpoint.
+    if rank0:
+        checkpoint_name = find_checkpoint_rank_0(load_dir, iteration, release)
+    else:
+        checkpoint_name = get_checkpoint_name(load_dir, iteration, release)
 
     dist_opt_checkpoint_name = get_dist_optimizer_checkpoint_name(
         load_dir, iteration, release
@@ -653,18 +678,15 @@ def _load_base_checkpoint(load_dir, rank0=False):
 
     # Load the checkpoint.
     try:
-        model_state_dict = torch.load(checkpoint_name, map_location="cpu")
         opt_state_dict = {}
         if os.path.exists(dist_opt_checkpoint_name):
-            opt_state_dict = torch.load(
-                dist_opt_checkpoint_name, map_location="cpu"
-            )
+            opt_state_dict = torch.load(dist_opt_checkpoint_name, map_location="cpu")
     except BaseException as e:
         print_rank_0("could not load the checkpoint")
         print_rank_0(e)
         sys.exit()
 
-    return model_state_dict, opt_state_dict, checkpoint_name, release
+    return opt_state_dict
 
 
 def load_parameter_state_from_state_dict(dist_optimizer, state_dict):

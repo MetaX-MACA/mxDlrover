@@ -190,7 +190,7 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             local_shm_tensor.copy_(shm_tensor)
             shm_hanlder.metadata.set(meta)
 
-    def gather(self, shm_handler: SharedMemoryHandler):
+    def gather(self, self_shm_handler: SharedMemoryHandler):
         """
         The method gathers the checkpoint shard from the memory of the peer
         node in a backup group. Assuming each backup group has two nodes,
@@ -213,8 +213,13 @@ class ShardCkptReplicaManager(CkptReplicaManger):
         shm_handlers = {}
         for rank in self.backup_ranks:
             if rank != self.rank:
-                shm_handler = SharedMemoryHandler(local_rank=rank)
-                shm_handler.init_shared_memory()
+                if (rank not in self._rank_shms):
+                    shm_handler = SharedMemoryHandler(local_rank=rank)
+                    shm_handler.init_shared_memory()
+                else:
+                    shm_handler = self._rank_shms[rank]
+            else:
+                shm_handler = self_shm_handler
             shm_handlers[rank] = shm_handler
         shm_tensor, meta = self._gather_owner_checkpoint(shm_handlers)
         return shm_tensor, meta
