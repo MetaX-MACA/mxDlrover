@@ -97,6 +97,7 @@ class CheckpointConfig:
     world_size: int = 0
     step: int = 0
     writing_shm: bool = False
+    write_model: bool = True
     paths: Dict[str, str] = None  # type: ignore
 
 
@@ -378,6 +379,7 @@ class AsyncCheckpointSaver(metaclass=ABCMeta):
         local_shard_num=1,
         global_shard_num=1,
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+        replica_count=0,
     ) -> None:
         logger.info(
             "Initializing the AsyncSaver with arguments: "
@@ -392,9 +394,11 @@ class AsyncCheckpointSaver(metaclass=ABCMeta):
         self._node_rank = env_utils.get_node_rank()
         self._is_agent_rank_0 = self._node_rank == 0
         self._shm_handlers: List[SharedMemoryHandler] = []
+        self._backup_shm_handlers: List[SharedMemoryHandler] = []
         self._shm_locks: List[SharedLock] = []
         self._stop_commit = False
         self._save_timeout = save_timeout
+        self._replicat_count = 0
 
         module = importlib.import_module(storage_meta.module_path)
         storage_class_def = getattr(module, storage_meta.class_name)
@@ -421,8 +425,26 @@ class AsyncCheckpointSaver(metaclass=ABCMeta):
         )
         logger.info("AsyncSaver initialized.")
 
+        if replica_count != 0 :
+            self._replicat_count = replica_count
+            self.init_backup_group()
+
     def __del__(self):
         self.close()
+
+    def init_backup_group(self):
+        if self._replicat_count <= 0:
+            return
+
+        for i in range(1, self._replicat_count):
+            for j in range(self.local_shard_num):
+                self._backup_shm_handlers.append(SharedMemoryHandler(i*self.local_shard_num +j))
+        logger.info(
+            "Init_backup_group: "
+            f"_replicat_count={self._replicat_count}, "
+            f"local_shard_num={self.local_shard_num}, "
+        )
+        return
 
     @classmethod
     def start_async_saving_ckpt(cls):
@@ -988,6 +1010,8 @@ class CommonDirCheckpointSaver(AsyncCheckpointSaver):
     ):
         state_dict = self._shm_handlers[local_shard_id].load_state_dict()
         for state_name, sd in state_dict.items():
+            if not ckpt_config.write_model and state_name == CheckpointConstant.MODEL_STATES_NAME:
+                continue
             if sd and state_name in ckpt_config.paths:
                 path = ckpt_config.paths[state_name]
                 self.storage.write_state_dict(sd, path, torch.save)

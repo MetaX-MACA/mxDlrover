@@ -212,10 +212,11 @@ class CheckpointEngine(metaclass=ABCMeta):
         self._loader_group = None
         self._saver_group = None
         self._saving_ranks: Optional[List[int]] = None
+        self._replica_count = replica_count
         self._init_sync_group(comm_backend)
         shard_num = self.get_global_shard_num()
         self._replica_manager = CkptReplicaManger.create_replica_manager(
-            shard_num, replica_count
+            shard_num, replica_count, local_shard_num
         )
         logger.info(
             "Checkpoint engine initialized with "
@@ -294,6 +295,7 @@ class CheckpointEngine(metaclass=ABCMeta):
                 "local_shard_num": local_shard_num,
                 "global_shard_num": global_shard_num,
                 "save_timeout": self._save_timeout,
+                "replica_count": self._replica_count,
             },
         )
 
@@ -387,6 +389,11 @@ class CheckpointEngine(metaclass=ABCMeta):
             shm_size = byte_tensor.size()[0]
             self._shm_handler.init_shared_memory(create=True, size=shm_size)
             self._shm_handler.metadata.set(meta)
+            local_shm_tensor = torch.frombuffer(
+                buffer=self._shm_handler.shared_memory.buf,
+                dtype=torch.uint8,
+            )
+            local_shm_tensor.copy_(byte_tensor)
             logger.info(
                 f"Restore the checkpoint shard with size = {shm_size}"
                 "from the replica in the memory of the alive node."
