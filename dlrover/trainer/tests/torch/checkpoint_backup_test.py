@@ -71,21 +71,38 @@ def run_checkpoint_backup(rank, world_size):
     }
     shm_hanlder.save_state_dict(state_dict)
 
+    if rank == 0:
+        handle_back = SharedMemoryHandler(2)
+        handle = SharedMemoryHandler(0)
+    elif rank == 1:
+        handle_back = SharedMemoryHandler(3)
+        handle = SharedMemoryHandler(1)
+
     with mock.patch.object(
         ShardCkptReplicaManager, "_get_backup_ranks", return_value=[0, 1]
     ):
-        back_manager = ShardCkptReplicaManager(replica_count=2)
-    back_manager.backup_ranks = list(range(world_size))
+        back_manager = ShardCkptReplicaManager(replica_count=2, shard_num=2)
+
     back_manager.backup(shm_hanlder)
     if rank == 0:
-        shm_hanlders = [shm_hanlder, shm_hanlder]
-    else:
-        peer_shm_handler = SharedMemoryHandler(2)
-        shm_hanlders = [peer_shm_handler, peer_shm_handler]
-    shm_tensor, _ = back_manager._gather_owner_checkpoint(shm_hanlders)
-    if rank == 0 and shm_tensor.numel() != 1632:
+        shm_tensor, _ = back_manager.gather(shm_hanlder)
+    elif rank == 1:
+        # assume rank 1 restart from new node
+        handle_back.unlink()
+        handle.unlink()
+        handle_back = SharedMemoryHandler(4)
+        handle = SharedMemoryHandler(5)
+        rank0_shm_handler = SharedMemoryHandler(4, host=False)
+        rank1_shm_handler = SharedMemoryHandler(5, host=False)
+        shm_hanlders = [rank0_shm_handler, rank1_shm_handler]
+        flags = back_manager._gather_restart_node(True)
+        shm_tensor, _ = back_manager._gather_restart_node_checkpoint(
+            shm_hanlders, flags)
+    if rank == 0 and shm_tensor:
         raise ValueError("Test Failed!")
-
+    if rank == 1 and shm_tensor.numel() != 1632:
+        raise ValueError("Test Failed!")
+    
     with mock.patch.object(
         FullCkptReplicaManager, "_get_backup_ranks", return_value=[0, 1]
     ):
@@ -93,6 +110,7 @@ def run_checkpoint_backup(rank, world_size):
     shm_tensor, _ = back_manager.gather(shm_hanlder)
     if rank == 0 and shm_tensor.numel() != 1632:
         raise ValueError("Test Failed!")
+
     cleanup()
 
 
@@ -106,14 +124,14 @@ class CheckpointBackupTest(unittest.TestCase):
         mock_get_rank.return_value = 1
         os.environ["LOCAL_RANK"] = "0"
         os.environ["LOCAL_WORLD_SIZE"] = "8"
-        shard_manager = ShardCkptReplicaManager(replica_count=2)
+        shard_manager = ShardCkptReplicaManager(replica_count=2, shard_num=2)
         self.assertListEqual(shard_manager.backup_ranks, [0, 8])
 
         os.environ["NODE_NUM"] = "4"
         shard_manager = FullCkptReplicaManager(replica_count=2)
         self.assertListEqual(shard_manager.backup_ranks, [0, 8, 16, 24])
 
-        shard_manager = ShardCkptReplicaManager(replica_count=0)
+        shard_manager = ShardCkptReplicaManager(replica_count=0, shard_num=16)
         self.assertListEqual(shard_manager.backup_ranks, [])
 
     def test_backup_checkpoint(self):

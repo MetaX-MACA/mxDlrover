@@ -140,6 +140,7 @@ class DeepSpeedCheckpointTest(unittest.TestCase):
                 if time.time() - start > 10:
                     break
 
+            time.sleep(2) #wait tracer_file update
             with open(tracer_file, "r") as f:
                 restored_step = int(f.read())
             self.assertTrue(os.path.exists(tracer_file))

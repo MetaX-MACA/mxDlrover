@@ -34,7 +34,10 @@ class CkptReplicaManger(metaclass=ABCMeta):
         self.node_rank = env_utils.get_node_rank()
         self.node_num = env_utils.get_node_num()
         self.current_device = torch.device("cpu")
-        self.world_size = dist.get_world_size()
+        if dist.is_initialized():
+            self.world_size = dist.get_world_size()
+        else:
+            self.world_size = 1
         self._rank_shms: Dict[int, SharedMemoryHandler] = {}
         self._backup_ranks: List[int] = []
         self._backup_group = None
@@ -86,6 +89,8 @@ class ShardCkptReplicaManager(CkptReplicaManger):
         self.backup_ranks = self._get_backup_ranks(
             replica_count=replica_count, rank_num=self.rank, local_rank=self.local_rank
         )
+
+        # backup_shardids is used to save shared memory handle name id each backup rank
         self.backup_shardids = self._get_backup_shardids(
             replica_count=replica_count, local_rank=self.local_rank, shard_num=shard_num
         )
@@ -101,7 +106,7 @@ class ShardCkptReplicaManager(CkptReplicaManger):
                     self._backup_group = groups
             logger.info(
                 f"ShardCkptReplicaManager rank {self.rank} local rank {self.local_rank} "
-                f"shard_num {shard_num} len {dist.get_world_size(self._backup_group)} "
+                f"shard_num {shard_num} backup_ranks {self.backup_ranks} "
                 f"backup_shardids {self.backup_shardids}"
             )
 
@@ -171,9 +176,9 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             byte_tensor = torch.frombuffer(
                 buffer=buffer,
                 dtype=torch.uint8,
-            ).clone()
+            ).to(self.current_device)
         else:
-            byte_tensor = torch.ByteTensor(buffer)
+            byte_tensor = torch.ByteTensor(buffer).to(self.current_device)
         group_size = dist.get_world_size(group=self._backup_group)
         max_size = self._get_max_tensor_size(byte_tensor)
         # Resize tensor to max size across all ranks.
@@ -186,9 +191,11 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             for _ in range(group_size)
         ]
         output_meta_objs = [None for _ in range(group_size)]
-        if (max_size == 0):
+        if max_size == 0:
             return output_tensors, output_meta_objs
-        dist.all_gather(output_tensors, byte_tensor, group=self._backup_group)
+        dist.all_gather(
+            output_tensors, byte_tensor, group=self._backup_group
+        )
         dist.all_gather_object(
             output_meta_objs, meta_data, group=self._backup_group
         )
@@ -265,15 +272,69 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             else:
                 shm_handler = self_shm_handler
             shm_handlers.append(shm_handler)
-        shm_tensor, meta = self._gather_owner_checkpoint(shm_handlers)
+        restart_node = True if self_shm_handler.shared_memory is None else False
+        flags = self._gather_restart_node(restart_node)
+        shm_tensor, meta = self._gather_restart_node_checkpoint(shm_handlers, flags)
         return shm_tensor, meta
 
-    def _gather_owner_checkpoint(
-        self, shm_handlers: Dict[int, SharedMemoryHandler]
+    def _gather_restart_node(self, restart: bool):
+        flags = [None for _ in range(dist.get_world_size(self._backup_group))]
+
+        dist.all_gather_object(flags, restart, group=self._backup_group)
+        return flags
+
+    def _gather_rank_ckpt(self, buffer, meta_data, dst_rank):
+        if len(buffer):
+            byte_tensor = torch.frombuffer(
+                buffer=buffer,
+                dtype=torch.uint8,
+            ).to(self.current_device)
+        else:
+            byte_tensor = torch.ByteTensor(buffer).to(self.current_device)
+        group_size = dist.get_world_size(group=self._backup_group)
+        max_size = self._get_max_tensor_size(byte_tensor)
+        output_tensors = []
+        output_meta_objs = []
+        if max_size == 0:
+            return output_tensors, output_meta_objs
+        # Resize tensor to max size across all ranks.
+        byte_tensor.resize_(max_size)
+
+        if dst_rank == self.rank:
+            output_tensors = [
+                torch.empty(max_size, dtype=torch.uint8, device=self.current_device)
+                for _ in range(group_size)
+            ]
+            output_meta_objs = [None for _ in range(group_size)]
+
+        req = dist.gather(
+            byte_tensor, output_tensors, dst_rank, group=self._backup_group, async_op=True,
+        )
+        dist.gather_object(
+            meta_data, output_meta_objs, dst_rank, group=self._backup_group
+        )
+        req.wait()
+        return output_tensors, output_meta_objs
+
+    def _gather_restart_node_checkpoint(
+        self,
+        shm_handlers: Dict[int, SharedMemoryHandler],
+        flags: List[bool],
     ):
+        """
+        Arguments:
+            shm_handlers: The shared memory handler of the current rank on
+                this node.
+            flags: The restart node in group
+        Returns:
+            ByteTensor of the checkpoint shard. If node is not new starter, None will be returned.
+            A dict of checkpoint shard meta data. If node is not new starter, None will be returned.
+        """
         ckpt_shm_tensor = None
         ckpt_meta = {}
         for i, rank in enumerate(self.backup_ranks):
+            if not flags[i]:
+                continue
             shm_handler = shm_handlers[i]
             if shm_handler.shared_memory:
                 assert shm_handler.shared_memory is not None
@@ -282,7 +343,7 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             else:
                 buffer = memoryview(b"")
                 meta_data = {}
-            shm_tensors, ckpt_metas = self._gather_peer_ckpt(buffer, meta_data)
+            shm_tensors, ckpt_metas = self._gather_rank_ckpt(buffer, meta_data, rank)
             if rank != self.rank:
                 continue
             for shm_tenor, meta in zip(shm_tensors, ckpt_metas):
