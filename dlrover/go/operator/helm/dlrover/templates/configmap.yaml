@@ -12,6 +12,16 @@ metadata:
 
 apiVersion: v1
 data:
+  topology_config: |
+kind: ConfigMap
+metadata:
+  name: topo-configmap
+  namespace: {{ .Release.Namespace }}
+
+---
+
+apiVersion: v1
+data:
   controller_manager_config.yaml: |
     apiVersion: controller-runtime.sigs.k8s.io/v1alpha1
     kind: ControllerManagerConfig

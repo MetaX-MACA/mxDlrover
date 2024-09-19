@@ -27,7 +27,7 @@ from dlrover.python.common.constants import (
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node
 from dlrover.python.master.elastic_training.net_topology import (
-    DefaultTopologyQuerier,
+    ConfigmapTopologyQuerier,
     DpTopologySorter,
     NodeTopologyMeta,
 )
@@ -77,7 +77,8 @@ class RendezvousManager(metaclass=ABCMeta):
         self._latest_log_nodes_time = 0
         # key is the node rank, value is the step.
         self._save_ckpt_nodes: Dict[int, int] = {}
-        self._topology_querier = DefaultTopologyQuerier()
+        # self._topology_querier = DefaultTopologyQuerier()
+        self._topology_querier = ConfigmapTopologyQuerier("dlrover")
         self._topology_sorter = DpTopologySorter()
         self._error_monitor = error_monitor
 
