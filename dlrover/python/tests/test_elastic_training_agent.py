@@ -425,7 +425,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
         )
 
         # without timeout
-        agent._stop_workers(None, 3)
+        agent._stop_workers(None, is_restart=False, timeout=3)
 
         def sleep_10_seconds(*args, **kwargs):
             time.sleep(10)
@@ -443,7 +443,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
                 log_dir=self.config.log_dir,
             )
             try:
-                agent._stop_workers(None, 3)
+                agent._stop_workers(None, is_restart=False, timeout=3)
                 self.fail()
             except TimeoutError:
                 self.assertTrue(True)
