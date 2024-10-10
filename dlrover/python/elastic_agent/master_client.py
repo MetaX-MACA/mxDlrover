@@ -20,9 +20,13 @@ from contextlib import closing
 from dlrover.proto import elastic_training_pb2, elastic_training_pb2_grpc
 from dlrover.python.common import env_utils, grpc
 from dlrover.python.common.constants import NetworkFailureReason, NodeEnv
-from dlrover.python.common.diagnosis import ChipMetrics, CudaLog, TrainingLog
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.singleton import Singleton
+from dlrover.python.diagnosis.common.diagnosis_data import (
+    ChipMetrics,
+    CudaLog,
+    TrainingLog,
+)
 
 
 def retry_grpc_request(func):
@@ -356,13 +360,14 @@ class MasterClient(Singleton):
         return result.nodes
 
     def report_rdzv_params(
-        self, min_nodes, max_nodes, waiting_timeout, node_unit
+        self, min_nodes, max_nodes, waiting_timeout, node_unit, joint_timeout
     ):
         message = grpc.RendezvousParams(
             min_nodes,
             max_nodes,
             waiting_timeout,
             node_unit,
+            joint_timeout,
         )
         response = self._report(message)
         return response.success

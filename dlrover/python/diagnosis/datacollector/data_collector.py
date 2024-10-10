@@ -11,19 +11,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dlrover.python.common.diagnosis import ChipMetrics
-from dlrover.python.elastic_agent.datacollector.data_collector import (
-    DataCollector,
-)
+from abc import ABCMeta, abstractmethod
 
 
-class MetricsCollector(DataCollector):
-    def __init__(self, *args, **kwargs):
+class CollectorType:
+    CUDALOG = "cuda_log"
+    TRAININGLOG = "training_log"
+    CHIPMETRICS = "chip_metrics"
+
+
+class DataCollector(metaclass=ABCMeta):
+    """
+    DataCollector collects certain type of data and report to master.
+    Those data is used to diagnosis the faults of training.
+    """
+
+    def __init__(self):
         pass
 
+    @abstractmethod
     def collect_data(self) -> object:
-        chip_metrics = ChipMetrics(0)
-        return chip_metrics
+        pass
 
+    @abstractmethod
     def to_collect_data(self) -> bool:
-        return True
+        pass

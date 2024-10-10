@@ -11,21 +11,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import unittest
 
-from dlrover.python.common.diagnosis import node_failed
+class InferenceConfigKey(object):
+    LOG_FILE = "log_file"
+    ERRORS = "errors"
 
 
-class DiagnosisTest(unittest.TestCase):
-    def setUp(self):
-        pass
-
-    def tearDown(self):
-        pass
-
-    def test_should_relaunch_worker(self):
-        file = "data/training.log"
-        path = os.path.dirname(__file__)
-        file_path = os.path.join(path, file)
-        self.assertTrue(node_failed(file_path))
+class DiagnoseAction(object):
+    NO_ACTION = "no_action"
+    RESTART_WORKER = "restart_worker"
+    RELAUNCH_WORKER = "relaunch_worker"

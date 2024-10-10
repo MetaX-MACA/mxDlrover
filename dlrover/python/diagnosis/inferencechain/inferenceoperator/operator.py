@@ -1,4 +1,4 @@
-# Copyright 2023 The DLRover Authors. All rights reserved.
+# Copyright 2024 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,26 +11,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABCMeta, abstractmethod
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.check_failure_node_operator import (  # noqa: E501
+    CheckFailureNodeOperator,
+)
 
 
-class JobMaster(metaclass=ABCMeta):
-    @abstractmethod
-    def prepare(self):
-        pass
-
-    @abstractmethod
-    def pre_check(self):
-        pass
-
-    @abstractmethod
-    def run(self):
-        pass
-
-    @abstractmethod
-    def stop(self):
-        pass
-
-    @abstractmethod
-    def request_stop(self, success, reason, msg=""):
-        pass
+def get_training_failure_operators():
+    return [CheckFailureNodeOperator()]

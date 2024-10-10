@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import copy
+import json
 import os
 import threading
 import time
@@ -21,6 +22,8 @@ from typing import Dict, List, Optional
 
 from dlrover.python.common.constants import (
     DistributionStrategy,
+    ElasticJobLabel,
+    ErrorMonitorConstants,
     JobExitReason,
     NodeEventType,
     NodeExitReason,
@@ -73,6 +76,7 @@ from dlrover.python.master.watcher.factory import (
 from dlrover.python.scheduler.factory import new_elastic_job
 from dlrover.python.scheduler.job import ElasticJob, JobArgs
 from dlrover.python.master.dragonfly.dragonfly_topo import DragonflyTopoManager
+from dlrover.python.util import k8s_util
 
 _dlrover_context = Context.singleton_instance()
 
@@ -165,6 +169,7 @@ class DistributedJobManager(JobManager):
         self._init_training_node_manager()
         self._topo_manager = DragonflyTopoManager.singleton_instance(job_args.namespace)
         self._enable_dragonfly = self._topo_manager.dragonfly_enable()
+        self._error_monitor = error_monitor
 
     def start(self):
         self._scaler.start()
@@ -175,7 +180,7 @@ class DistributedJobManager(JobManager):
         self._init_job_auto_scaler()
         plan = self._create_initial_scale_plan()
         if not self._has_running_workers():
-            # The the job relaunches the evicted master, there are alive
+            # The job relaunches the evicted master, there are alive
             # worker nodes and the master does not need to launch workers.
             logger.info(
                 "The newly master starts launching workers at beginning."
@@ -217,46 +222,88 @@ class DistributedJobManager(JobManager):
     def get_worker_num(self):
         return self._job_resource.worker_num
 
+    def is_all_reduce_type_job(self):
+        return (
+            self._job_args.distribution_strategy
+            == DistributionStrategy.ALLREDUCE
+        )
+
     def should_early_stop(self):
         # ps pending judgement: any ps pod pending timeout
         timeout_ps_nodes = (
             self._ps_manager.get_pending_timeout_oom_recovered_node()
         )
+
         if len(timeout_ps_nodes) > 0:
             msg = (
                 "Stop the training early because the nodes recovered from OOM "
                 "are pending too long and have timed out."
             )
-            self._error_monitor.process_error(
+
+            self._process_error(
                 timeout_ps_nodes[0],
                 0,
                 msg,
                 level=TrainingExceptionLevel.ERROR,
             )
+            self._report_event(
+                ErrorMonitorConstants.TYPE_INFO,
+                "job",
+                ErrorMonitorConstants.ACTION_EARLY_STOP,
+                "PS OOM",
+                {},
+            )
             return True, JobExitReason.PENDING_TIMEOUT, msg
 
         # worker pending judgement:
-        if self._worker_manager.is_training_hang_by_pending(
-            self.get_worker_num()
+        if (
+            self.is_all_reduce_type_job()
+            and self._worker_manager.is_training_hang_by_pending(
+                self.get_worker_num()
+            )
         ):
             msg = (
                 "Stop the training early because 1) there is node pending "
                 "2) alive worker number consistently less than the min "
                 "training nodes required 3) pending time last exceed limit."
             )
-            self._error_monitor.process_error(
+            self._process_error(
                 None, 0, msg, level=TrainingExceptionLevel.ERROR
+            )
+            first_pending_node = self._worker_manager.first_pending_node
+            self._report_event(
+                ErrorMonitorConstants.TYPE_INFO,
+                "job",
+                ErrorMonitorConstants.ACTION_EARLY_STOP,
+                "Pending nodes",
+                {
+                    "pending_nodes": json.dumps(
+                        self._worker_manager.pending_nodes
+                    ),
+                    "first_pending_node": first_pending_node,
+                },
             )
             return True, JobExitReason.PENDING_TIMEOUT, msg
 
         # insufficient worker judgement
-        if self._worker_manager.is_training_hang_by_insufficient_worker():
+        if (
+            self.is_all_reduce_type_job()
+            and self._worker_manager.is_training_hang_by_insufficient_worker()
+        ):
             msg = (
                 "Stop the training early because there isn't enough node to "
                 "keep training."
             )
-            self._error_monitor.process_error(
+
+            self._process_error(
                 None, 0, msg, level=TrainingExceptionLevel.ERROR
+            )
+            self._report_event(
+                ErrorMonitorConstants.TYPE_INFO,
+                "job",
+                ErrorMonitorConstants.ACTION_EARLY_STOP,
+                "Not enough nodes",
+                {"nodes": json.dumps(self._worker_manager.cur_nodes)},
             )
             return True, JobExitReason.UNCOMPLETED_TIMEOUT, msg
 
@@ -441,7 +488,7 @@ class DistributedJobManager(JobManager):
                     error_data = (
                         f"No heartbeat for over {window_interval} seconds."
                     )
-                    self._error_monitor.process_error(
+                    self._process_error(
                         node,
                         node.relaunch_count,
                         error_data,
@@ -548,9 +595,46 @@ class DistributedJobManager(JobManager):
         self._scaler.scale(plan=plan)
         os._exit(0)
 
+    def _get_pod_unique_labels(self, node: Node):
+        return {
+            ElasticJobLabel.JOB_KEY: self._job_args.job_name,
+            ElasticJobLabel.REPLICA_TYPE_KEY: node.type,
+            ElasticJobLabel.RANK_INDEX_KEY: node.rank_index,
+        }
+
     def _process_event(self, event: NodeEvent):
         node_type = event.node.type
+        node_status = event.node.status
         node_id = event.node.id
+
+        # Skip deleted event of pod if the cluster has relaunched a new pod
+        # with the same type and rank as the deleted pod.
+        if (
+            event.event_type == NodeEventType.DELETED
+            or node_status == NodeStatus.DELETED
+        ) and event.node.exit_reason != NodeExitReason.NO_HEARTBEAT:
+            pod_labels_selector = k8s_util.gen_k8s_label_selector_from_dict(
+                self._get_pod_unique_labels(event.node)
+            )
+            logger.info(
+                f"Recheck running pod with labels: {pod_labels_selector} "
+                f"for deleted event."
+            )
+            pods = self._k8s_client.list_namespaced_pod(pod_labels_selector)
+            if (
+                pods
+                and len(pods.items) > 0
+                and any(
+                    pod.status.phase == NodeStatus.RUNNING
+                    for pod in pods.items
+                )
+            ):
+                logger.info(
+                    f"Skip deleted event for pod : {pod_labels_selector} "
+                    f"for same running pod already exists."
+                )
+                return
+
         if node_id not in self._job_nodes[node_type]:
             logger.info(f"The node {event.node.name} is released.")
             return
@@ -586,6 +670,13 @@ class DistributedJobManager(JobManager):
         # the state change condition
         if event.event_type == "exit":
             self.close_job()
+            self._report_event(
+                ErrorMonitorConstants.TYPE_INFO,
+                self._job_args.job_name,
+                ErrorMonitorConstants.ACTION_STOP,
+                "",
+                {},
+            )
         new_status = event.node.status
         with self._lock:
             old_status = cur_node.status
@@ -593,7 +684,7 @@ class DistributedJobManager(JobManager):
                 old_status, event.event_type, new_status
             )
             # If there is no matched state change, return directly
-            # If the node has been succeed, return directly
+            # If the node status is success, return directly
             if (
                 status_change_flow is None
                 or status_change_flow.from_status == NodeStatus.SUCCEEDED
@@ -616,9 +707,23 @@ class DistributedJobManager(JobManager):
             f"{cur_node.name} status change: {old_status} to {new_status} "
             f"by the event {event.event_type}. "
         )
+        event_type = ErrorMonitorConstants.TYPE_INFO
         if new_status in [NodeStatus.FAILED, NodeStatus.DELETED]:
             msg += f"Exit reason is {cur_node.exit_reason}"
+            event_type = ErrorMonitorConstants.TYPE_ERROR
         logger.info(msg)
+        self._report_event(
+            event_type=event_type,
+            instance=cur_node.name,
+            action=ErrorMonitorConstants.ACTION_STATUS_UPDATE,
+            msg=f"{old_status} to {new_status}",
+            labels={
+                "from_state": old_status,
+                "to_state": new_status,
+                "node": cur_node.host_name,
+                "exit reason": cur_node.exit_reason,
+            },
+        )
 
         if should_relaunch:
             if self._enable_dragonfly:
@@ -668,12 +773,14 @@ class DistributedJobManager(JobManager):
             and self._enable_relaunch_node
             and node.relaunchable
         )
+        msg = ""
         if should_relaunch:
             if (
                 node.exit_reason == NodeExitReason.FATAL_ERROR
                 and not _dlrover_context.relaunch_always
             ):
                 should_relaunch = False
+                msg = "Disable relaunch"
             elif node.exit_reason == NodeExitReason.OOM:
                 mem = node.config_resource.memory
                 if mem >= NodeResourceLimit.MAX_MEMORY:
@@ -683,12 +790,17 @@ class DistributedJobManager(JobManager):
                         mem,
                         NodeResourceLimit.MAX_MEMORY,
                     )
+                    msg = f"{mem} beyond {NodeResourceLimit.MAX_MEMORY}"
                 elif node.relaunch_count >= node.max_relaunch_count:
                     should_relaunch = False
                     logger.warning(
                         "The relaunched count %s is beyond the maximum %s.",
                         node.relaunch_count,
                         node.max_relaunch_count,
+                    )
+                    msg = (
+                        f"Relaunched {node.relaunch_count} "
+                        f"beyond {node.max_relaunch_count}"
                     )
                 else:
                     node.is_recovered_oom = True
@@ -701,8 +813,21 @@ class DistributedJobManager(JobManager):
                         "has been exhausted."
                     )
                     should_relaunch = False
+                    msg = (
+                        f"{node.relaunch_count} "
+                        f"exhausted {node.max_relaunch_count}"
+                    )
         if should_relaunch:
             node.relaunch_count += 1
+
+        if not should_relaunch and len(msg) > 0:
+            self._report_event(
+                ErrorMonitorConstants.TYPE_INFO,
+                node.name,
+                ErrorMonitorConstants.ACTION_NOT_RELAUNCH,
+                msg,
+                {},
+            )
 
         return should_relaunch
 
@@ -725,6 +850,17 @@ class DistributedJobManager(JobManager):
             )
         else:
             logger.error("Not support node type %s", node.type)
+        if plan and len(plan.launch_nodes) > 0:
+            self._report_event(
+                event_type=ErrorMonitorConstants.TYPE_INFO,
+                instance=node.name,
+                action=ErrorMonitorConstants.ACTION_RELAUNCH,
+                msg=f"{plan.launch_nodes[0].id}",
+                labels={
+                    "relaunch_pod": f"{plan.launch_nodes[0].id}",
+                    "node": node.host_name,
+                },
+            )
         self._set_ps_addrs_in_plan(plan)
         if self._remove_exited_node:
             plan.remove_nodes.append(node)
@@ -968,6 +1104,28 @@ class DistributedJobManager(JobManager):
         ps_addrs = self._ps_manager.get_ps_addrs()
         plan.ps_addrs.extend(ps_addrs)
 
+    def _report_event(
+        self,
+        event_type: str,
+        instance: str,
+        action: str,
+        msg: str,
+        labels: Dict[str, str],
+    ):
+        if self._error_monitor:
+            self._error_monitor.report_event(
+                event_type, instance, action, msg, labels
+            )
+
+    def _process_error(
+        self, node: Node, restart_count: int, error_data: str, level: str
+    ) -> bool:
+        if self._error_monitor:
+            return self._error_monitor.process_error(
+                node, restart_count, error_data, level
+            )
+        return False
+
     def all_running_node_hanged(self):
         node_hang = self._worker_manager.running_nodes_hanged()
         node_hang.extend(self._chief_manager.running_nodes_hanged())
@@ -1000,7 +1158,7 @@ class DistributedJobManager(JobManager):
         if node.is_released:
             logger.info(f"The node {node.name} has been released.")
             return
-        relaunch_node = self._error_monitor.process_error(
+        relaunch_node = self._process_error(
             node, restart_count, error_data, level
         )
         if relaunch_node and node.relaunchable:
@@ -1009,7 +1167,7 @@ class DistributedJobManager(JobManager):
                     node_group: List[Node] = self._get_node_group(node)
                     for member in node_group:
                         if node != member:
-                            self._error_monitor.process_error(
+                            self._process_error(
                                 member, -1, "group err",
                                 TrainingExceptionLevel.NODE_ERROR,
                             )
@@ -1036,6 +1194,11 @@ class DistributedJobManager(JobManager):
 
     def collect_node_heart_beat(self, node_type, node_id, timestamp):
         with self._lock:
+            if (
+                node_type not in self._job_nodes
+                or node_id not in self._job_nodes[node_type]
+            ):
+                return
             node = self._job_nodes[node_type][node_id]
             if node.heartbeat_time == 0:
                 logger.info(

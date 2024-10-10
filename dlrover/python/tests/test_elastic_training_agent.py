@@ -123,10 +123,18 @@ class ElasticTrainingAgentTest(unittest.TestCase):
             auto_config=True,
         )
         os.environ["NODE_NUM"] = "4"
+        os.environ["TRAINING_LOG_FILE"] = "training_log"
+        os.environ["FAILURE_NODE_ERRORS"] = "#errors#"
         config.auto_configure_params()
         self.assertEqual(config.max_nodes, 4)
         self.assertEqual(config.min_nodes, 4)
         self.assertTrue(config.network_check)
+        self.assertEqual(config.training_log_file, "training_log")
+        self.assertEqual(config.failure_node_errors, "#errors#")
+
+        os.environ["FAILURE_NODE_ERRORS"] = " #errors"
+        config.auto_configure_params()
+        self.assertEqual(config.failure_node_errors, "")
 
     def test_rank0_rendzevous(self):
         agent = ElasticTrainingAgent(
@@ -278,6 +286,20 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             log_dir=self.config.log_dir,
         )
         agent._report_failure_to_master({})
+        run_result = agent._invoke_run()
+        self.assertDictEqual(run_result.failures, {})
+        self.assertEqual(run_result.state, WorkerState.SUCCEEDED)
+
+    def test_failure_ending_after_training(self):
+        agent = ElasticTrainingAgent(
+            node_rank=0,
+            config=self.config,
+            entrypoint="echo",
+            spec=self.spec,
+            start_method=self.config.start_method,
+            log_dir=self.config.log_dir,
+        )
+        agent._wait_async_saver = mock.MagicMock(side_effect=[Exception])
         run_result = agent._invoke_run()
         self.assertDictEqual(run_result.failures, {})
         self.assertEqual(run_result.state, WorkerState.SUCCEEDED)
@@ -466,8 +488,8 @@ class NodeCheckElasticAgentTest(unittest.TestCase):
             rdzv_handler=self.rdzv_handler,
             max_restarts=self.config.max_restarts,
             monitor_interval=self.config.monitor_interval,
-            redirects=self.config.redirects,
-            tee=self.config.tee,
+            # redirects=self.config.redirects,
+            # tee=self.config.tee,
             master_addr=master_addr,
             local_addr=self.config.local_addr,
         )
@@ -511,6 +533,44 @@ class NodeCheckElasticAgentTest(unittest.TestCase):
             check_round=2,
         )
         self.assertEqual(agent._check_round, 2)
+
+    def test_run_agent(self):
+        config = ElasticLaunchConfig(4, 4, 8)
+        agent = _create_check_agent(
+            config=config,
+            entrypoint="python",
+            args=[],
+            rdzv_name="elastic-training",
+            check_round=2,
+        )
+
+        # with no fault and no stragglers
+        agent._run_node_check = mock.MagicMock(return_value=(True, 100))
+        agent._stop_workers = mock.MagicMock(return_value=True)
+        self.assertTrue(agent.run())
+
+        # with fault and no stragglers
+        agent._client.check_fault_node = mock.MagicMock(return_value=[0])
+        agent._client.check_straggler = mock.MagicMock(return_value=[])
+        try:
+            agent.run()
+            self.fail()
+        except RuntimeError:
+            pass
+
+        # with no fault and stragglers
+        agent._client.check_fault_node = mock.MagicMock(return_value=[])
+        agent._client.check_straggler = mock.MagicMock(return_value=[0])
+        self.assertTrue(agent.run())
+
+        # with fault and stragglers
+        agent._client.check_fault_node = mock.MagicMock(return_value=[1])
+        agent._client.check_straggler = mock.MagicMock(return_value=[0])
+        try:
+            agent.run()
+            self.fail()
+        except RuntimeError:
+            pass
 
     @mock.patch.object(NodeCheckElasticAgent, "run")
     def test_node_health_check(self, mock_run):
