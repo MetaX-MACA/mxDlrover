@@ -162,7 +162,7 @@ def _execute_cpu_comm(comm_op, *args):
     for _ in range(10):
         comm_op(*args)
 
-    round_num = 20
+    round_num = 200
     start = time.time()
     for _ in range(round_num):
         comm_op(*args)
