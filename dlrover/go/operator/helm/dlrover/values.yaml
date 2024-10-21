@@ -10,6 +10,9 @@ groupScheduler:
   per_group_num: "2" # Number of nodes per group in the topology
   topo_key: "metax-tech.com/topology.nodegroup" # The k8s label key used to identify the topological relationship
     
+topoMapper:
+  topology_config: |
+
 controller:
   image:
     name: "elasticjob-controller"

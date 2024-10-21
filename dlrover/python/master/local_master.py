@@ -40,10 +40,15 @@ class LocalJobMaster(JobMaster):
         self.speed_monitor = SpeedMonitor()
         self.task_manager = TaskManager(0, self.speed_monitor)
         self.job_manager = create_job_manager(args, self.speed_monitor)
-        elastic_training = RendezvousName.ELASTIC_TRAINING
+        elasticTraining = RendezvousName.ELASTIC_TRAINING
+        networkCheck = RendezvousName.NETWORK_CHECK
         self.rdzv_managers: Dict[str, RendezvousManager] = {
-            elastic_training: ElasticTrainingRendezvousManager(),
-            RendezvousName.NETWORK_CHECK: NetworkCheckRendezvousManager(),
+            elasticTraining: ElasticTrainingRendezvousManager(
+                namespace = args.namespace
+            ),
+            networkCheck: NetworkCheckRendezvousManager(
+                namespace = args.namespace
+            ),
         }
         self.job_metric_collector = self._create_metric_collector_if_needed(
             args

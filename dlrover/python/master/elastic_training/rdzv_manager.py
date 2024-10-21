@@ -27,6 +27,7 @@ from dlrover.python.common.constants import (
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node
 from dlrover.python.master.elastic_training.net_topology import (
+    DefaultTopologyQuerier,
     ConfigmapTopologyQuerier,
     DpTopologySorter,
     NodeTopologyMeta,
@@ -58,7 +59,7 @@ class RendezvousParameters(object):
 
 
 class RendezvousManager(metaclass=ABCMeta):
-    def __init__(self, error_monitor=None):
+    def __init__(self, error_monitor=None, namespace=None):
         self._lock = Lock()
         self._alive_nodes = set()
         self._released_workers = []
@@ -77,8 +78,10 @@ class RendezvousManager(metaclass=ABCMeta):
         self._latest_log_nodes_time = 0
         # key is the node rank, value is the step.
         self._save_ckpt_nodes: Dict[int, int] = {}
-        # self._topology_querier = DefaultTopologyQuerier()
-        self._topology_querier = ConfigmapTopologyQuerier("dlrover")
+        if namespace:
+            self._topology_querier = ConfigmapTopologyQuerier(namespace)
+        else:
+            self._topology_querier = DefaultTopologyQuerier()
         self._topology_sorter = DpTopologySorter()
         self._error_monitor = error_monitor
 
@@ -402,8 +405,8 @@ class ElasticTrainingRendezvousManager(RendezvousManager):
     Elasticjob of DLRover, the node has an unique node ID.
     """
 
-    def __init__(self, error_monitor=None):
-        super().__init__(error_monitor)
+    def __init__(self, error_monitor=None, namespace=None):
+        super().__init__(error_monitor, namespace)
         self._name = RendezvousName.ELASTIC_TRAINING
 
     def get_comm_world(
@@ -504,8 +507,8 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         node-1 if not available.
     """
 
-    def __init__(self, error_monitor=None):
-        super().__init__(error_monitor)
+    def __init__(self, error_monitor=None, namespace=None):
+        super().__init__(error_monitor, namespace)
         self._name = RendezvousName.NETWORK_CHECK
         self._node_status: Dict[int, bool] = {}
         self._node_times: Dict[int, float] = {}

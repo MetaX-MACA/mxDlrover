@@ -13,9 +13,10 @@ metadata:
 apiVersion: v1
 data:
   topology_config: |
+    {{ .Values.topoMapper.topology_config | nindent 4 }}
 kind: ConfigMap
 metadata:
-  name: topo-configmap
+  name: node-topology-config
   namespace: {{ .Release.Namespace }}
 
 ---

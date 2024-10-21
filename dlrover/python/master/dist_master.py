@@ -136,11 +136,16 @@ class DistributedJobMaster(JobMaster):
             if args.enable_dynamic_sharding
             else None
         )
-        elastic_training = RendezvousName.ELASTIC_TRAINING
+        elasticTraining = RendezvousName.ELASTIC_TRAINING
+        networkCheck = RendezvousName.NETWORK_CHECK
         self.rdzv_managers: Dict[str, RendezvousManager] = {
-            elastic_training: ElasticTrainingRendezvousManager(error_monitor),
-            RendezvousName.NETWORK_CHECK: NetworkCheckRendezvousManager(
-                error_monitor
+            elasticTraining: ElasticTrainingRendezvousManager(
+                error_monitor = error_monitor,
+                namespace = args.namespace
+            ),
+            networkCheck: NetworkCheckRendezvousManager(
+                error_monitor = error_monitor,
+                namespace = args.namespace
             ),
         }
         self.diagnosis_manager = DiagnosisManager()

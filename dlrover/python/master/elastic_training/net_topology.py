@@ -18,6 +18,7 @@ from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
+from kubernetes import client
 
 
 @dataclass
