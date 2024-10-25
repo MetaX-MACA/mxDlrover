@@ -43,12 +43,8 @@ class LocalJobMaster(JobMaster):
         elasticTraining = RendezvousName.ELASTIC_TRAINING
         networkCheck = RendezvousName.NETWORK_CHECK
         self.rdzv_managers: Dict[str, RendezvousManager] = {
-            elasticTraining: ElasticTrainingRendezvousManager(
-                namespace = args.namespace
-            ),
-            networkCheck: NetworkCheckRendezvousManager(
-                namespace = args.namespace
-            ),
+            elasticTraining: ElasticTrainingRendezvousManager(),
+            networkCheck: NetworkCheckRendezvousManager(),
         }
         self.job_metric_collector = self._create_metric_collector_if_needed(
             args
