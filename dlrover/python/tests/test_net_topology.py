@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import unittest
+import os
 from typing import Dict
 
 from dlrover.python.master.elastic_training.net_topology import (
@@ -56,7 +57,13 @@ class NetTopologyTest(unittest.TestCase):
         expected_ranks = [0, 3, 6, 9, 1, 4, 7, 2, 5, 8]
         self.assertListEqual(node_ranks, expected_ranks)
 
-        sw_file_querier = FileTopologyQuerier('data/config_test.txt')
+        # sw_file_querier = FileTopologyQuerier('data/topo_config.txt')
+        if ("dlrover/python/tests" in os.getcwd()):
+            sw_file_querier = FileTopologyQuerier('data/topo_config.txt')
+        else:
+            sw_file_querier = FileTopologyQuerier(
+                'dlrover/python/tests/data/topo_config.txt'
+            )
         
         for node in nodes.values():
             asw, psw = sw_file_querier.query(node.node_ip)

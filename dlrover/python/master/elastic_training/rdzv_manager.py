@@ -78,6 +78,7 @@ class RendezvousManager(metaclass=ABCMeta):
         self._latest_log_nodes_time = 0
         # key is the node rank, value is the step.
         self._save_ckpt_nodes: Dict[int, int] = {}
+        # local job can skip namespace injection
         if namespace:
             self._topology_querier = ConfigmapTopologyQuerier(namespace)
         else:

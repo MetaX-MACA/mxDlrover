@@ -53,6 +53,12 @@ class DefaultTopologyQuerier(TopologyQuerier):
 
 
 class FileTopologyQuerier(TopologyQuerier):
+    '''
+    The querier reads the network topology configuration file
+    on the provided file path.
+
+    '''
+
     def __init__(self, filename):
         self.node_sw_config = {}
         self._read_configfile(filename)
@@ -68,7 +74,7 @@ class FileTopologyQuerier(TopologyQuerier):
                         self.node_sw_config[ip] = (asw, psw)
                         logger.info(f"ASW: {asw}, PSW: {psw}, IP Address: {ip}")
         except FileNotFoundError as e:
-            logger.error("Failed to get topology_configfile, reason: {e}\n")
+            logger.error(f"Failed to get topology_configfile, reason: {e}\n")
 
     def query(self, node_ip) -> Tuple[str, str]:
         try:
@@ -78,6 +84,13 @@ class FileTopologyQuerier(TopologyQuerier):
 
 
 class ConfigmapTopologyQuerier(TopologyQuerier):
+    '''
+    The querier reads the node-topology-config configuration in the
+    provided namespace. In debug mode quier will handle appropriate
+    exceptions if there is no configmap or no matching configuration
+
+    '''
+    
     def __init__(self, namespace):
         self.node_sw_config = {}
         self._read_configmap(namespace)
@@ -87,15 +100,18 @@ class ConfigmapTopologyQuerier(TopologyQuerier):
         try:
             configmap = self._k8s_client.get_configmap("node-topology-config")
             logger.info("configmap node-topology-config Data:")
-            lines = configmap.data['topology_config'].splitlines()
-            for line in lines:
-                parts = line.split()
-                if len(parts) == 3:
-                    asw, psw, ip = parts
-                    self.node_sw_config[ip] = (asw, psw)
-                    logger.info(f"ASW: {asw}, PSW: {psw}, IP Address: {ip}")
+            try:
+                lines = configmap.data['topology_config'].splitlines()
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) == 3:
+                        asw, psw, ip = parts
+                        self.node_sw_config[ip] = (asw, psw)
+                        logger.info(f"ASW: {asw}, PSW: {psw}, IP Address: {ip}")
+            except KeyError:
+                logger.info("configmap is missing topology_config")
         except client.ApiException as e:
-            logger.error("Failed to get topology-configmap, reason: {e}\n")
+            logger.error(f"Failed to get topology-configmap, reason: {e}\n")
 
     def query(self, node_ip) -> Tuple[str, str]:
         try:
