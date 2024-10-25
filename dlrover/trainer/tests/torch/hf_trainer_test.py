@@ -14,6 +14,7 @@
 import os
 import tempfile
 import unittest
+import pytest
 
 from transformers import LlamaConfig, LlamaForCausalLM, TrainingArguments
 
@@ -35,6 +36,7 @@ class FlashCkptTrainerTest(unittest.TestCase):
             DdpCheckpointSaver._saver_instance.close()
         clear_sock_dir()
 
+    @pytest.mark.filterwarnings("ignore::Warning")
     def test_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             training_arguments = TrainingArguments(
