@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2024 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -90,7 +91,7 @@ class ConfigmapTopologyQuerier(TopologyQuerier):
     exceptions if there is no configmap or no matching configuration
 
     '''
-    
+
     def __init__(self, namespace):
         self.node_sw_config = {}
         self._read_configmap(namespace)
