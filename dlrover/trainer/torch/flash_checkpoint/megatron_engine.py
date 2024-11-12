@@ -172,7 +172,7 @@ class MegatronDistCheckpointEngine(CheckpointEngine):
         storage,
         comm_backend="",
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
-        replica_count=2,
+        replica_count=0,
     ):
         if dist.is_initialized():
             try:

@@ -155,6 +155,7 @@ class MegatronDistCheckpointer(Singleton):
         comm_backend="",
         use_distributed_optimizer=False,
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+        replica_count=0,
     ):
         self.storage = PosixDiskStorage() if not storage else storage
         if use_distributed_optimizer:
@@ -163,6 +164,7 @@ class MegatronDistCheckpointer(Singleton):
                 storage=self.storage,
                 comm_backend=comm_backend,
                 save_timeout=save_timeout,
+                replica_count=replica_count,
             )
         else:
             self.engine = MegatronCheckpointEngine(
@@ -170,6 +172,7 @@ class MegatronDistCheckpointer(Singleton):
                 storage=self.storage,
                 comm_backend=comm_backend,
                 save_timeout=save_timeout,
+                replica_count=replica_count,
             )
 
 def is_chained_optimizer(optimizer) -> bool:
@@ -193,6 +196,7 @@ def save_checkpoint(
     comm_backend="",
     deletion_strategy=None,
     save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+    replica_count=0,
 ):
     """
     Save a model checkpoint.
@@ -216,6 +220,7 @@ def save_checkpoint(
         comm_backend=comm_backend,
         use_distributed_optimizer=args.use_distributed_optimizer,
         save_timeout=save_timeout,
+        replica_count=replica_count,
     )
 
     # Only rank zero of the data parallel writes to the disk.
@@ -395,6 +400,7 @@ def load_checkpoint(
     comm_backend="",
     deletion_strategy=None,
     save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+    replica_count=0,
 ):
     """Load a model checkpoint and return the iteration.
     strict (bool): whether to strictly enforce that the keys in
@@ -419,6 +425,7 @@ def load_checkpoint(
         comm_backend=comm_backend,
         use_distributed_optimizer=args.use_distributed_optimizer,
         save_timeout=save_timeout,
+        replica_count=replica_count,
     )
 
     model = unwrap_model(model)
