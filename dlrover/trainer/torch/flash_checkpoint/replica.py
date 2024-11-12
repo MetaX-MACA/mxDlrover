@@ -24,7 +24,7 @@ from dlrover.python.elastic_agent.torch.ckpt_saver import (
     CheckpointConfig,
     SharedMemoryHandler,
 )
-
+from dlrover.python.common.log import default_logger as logger
 
 class CkptReplicaManger(metaclass=ABCMeta):
     def __init__(self, replica_count) -> None:
@@ -34,6 +34,7 @@ class CkptReplicaManger(metaclass=ABCMeta):
         self.node_rank = env_utils.get_node_rank()
         self.node_num = env_utils.get_node_num()
         self.current_device = torch.device("cpu")
+        self.world_size = dist.get_world_size()
         self._rank_shms: Dict[int, SharedMemoryHandler] = {}
         self._backup_ranks: List[int] = []
         self._backup_group = None
@@ -43,11 +44,13 @@ class CkptReplicaManger(metaclass=ABCMeta):
             self.rank = env_utils.get_rank()
 
     @staticmethod
-    def create_replica_manager(shard_num, replica_count):
+    def create_replica_manager(shard_num, replica_count, local_shard_num):
         if shard_num == 1:
             return FullCkptReplicaManager(replica_count)
         else:
-            return ShardCkptReplicaManager(replica_count)
+            return ShardCkptReplicaManager(
+                replica_count=replica_count, shard_num=local_shard_num
+            )
 
     def has_replica(self):
         """
@@ -77,16 +80,45 @@ class ShardCkptReplicaManager(CkptReplicaManger):
     of the current rank.
     """
 
-    def __init__(self, replica_count=0) -> None:
+    def __init__(self, replica_count=0, shard_num=0) -> None:
         super().__init__(replica_count)
 
-        self.backup_ranks = self._get_backup_ranks(replica_count)
+        self.backup_ranks = self._get_backup_ranks(
+            replica_count=replica_count, rank_num=self.rank, local_rank=self.local_rank
+        )
+        self.backup_shardids = self._get_backup_shardids(
+            replica_count=replica_count, local_rank=self.local_rank, shard_num=shard_num
+        )
         if dist.is_initialized() and replica_count > 0:
-            self._backup_group = dist.new_group(
-                backend="gloo", ranks=self.backup_ranks
+            for i in range(0, self.world_size // replica_count):
+                ranks = self._get_backup_ranks(
+                    rank_num=i,
+                    replica_count=replica_count,
+                    local_rank=i % self.local_world_size,
+                )
+                groups = dist.new_group(backend="gloo", ranks=ranks)
+                if self.rank in ranks:
+                    self._backup_group = groups
+            logger.info(
+                f"ShardCkptReplicaManager rank {self.rank} local rank {self.local_rank} "
+                f"shard_num {shard_num} len {dist.get_world_size(self._backup_group)} "
+                f"backup_shardids {self.backup_shardids}"
             )
 
-    def _get_backup_ranks(self, replica_count):
+    def _get_backup_shardids(self, replica_count=0, local_rank=0, shard_num=0):
+        local_shard_id = local_rank % shard_num
+        index = 1
+        backup_shardids = {}
+        for rank in self.backup_ranks:
+            if rank != self.rank:
+                backup_shardids[rank] = index * shard_num + local_shard_id
+                index += 1
+            else:
+                backup_shardids[rank] = local_shard_id
+
+        return backup_shardids
+
+    def _get_backup_ranks(self, replica_count=0, rank_num=-1, local_rank=0):
         """
         Get the ranks to backup checkpoint. Assuming each group has 3 nodes
         (group_size=3) and each node has 2 ranks. The backup ranks of local
@@ -107,10 +139,10 @@ class ShardCkptReplicaManager(CkptReplicaManger):
         if replica_count <= 0:
             return backup_ranks
 
-        group_index = self.node_rank // replica_count
+        group_index = rank_num // self.local_world_size // replica_count
         for i in range(replica_count):
             node_rank = group_index * replica_count + i
-            rank = node_rank * self.local_world_size + self.local_rank
+            rank = node_rank * self.local_world_size + local_rank
             backup_ranks.append(rank)
         return backup_ranks
 
@@ -135,7 +167,13 @@ class ShardCkptReplicaManager(CkptReplicaManger):
         self._write_peer_ckpt_to_shm(shm_tensors, ckpt_metas)
 
     def _gather_peer_ckpt(self, buffer, meta_data):
-        byte_tensor = torch.ByteTensor(buffer)
+        if len(buffer):
+            byte_tensor = torch.frombuffer(
+                buffer=buffer,
+                dtype=torch.uint8,
+            ).clone()
+        else:
+            byte_tensor = torch.ByteTensor(buffer)
         group_size = dist.get_world_size(group=self._backup_group)
         max_size = self._get_max_tensor_size(byte_tensor)
         # Resize tensor to max size across all ranks.
@@ -147,9 +185,10 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             )
             for _ in range(group_size)
         ]
-        dist.all_gather(output_tensors, byte_tensor, group=self._backup_group)
-
         output_meta_objs = [None for _ in range(group_size)]
+        if (max_size == 0):
+            return output_tensors, output_meta_objs
+        dist.all_gather(output_tensors, byte_tensor, group=self._backup_group)
         dist.all_gather_object(
             output_meta_objs, meta_data, group=self._backup_group
         )
@@ -178,7 +217,9 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             if config.rank == self.rank:
                 continue
             if config.rank not in self._rank_shms:
-                shm_hanlder = SharedMemoryHandler(local_rank=config.rank)
+                shm_hanlder = SharedMemoryHandler(
+                    local_rank=self.backup_shardids[config.rank], host=False
+                )
                 shm_hanlder.init_shared_memory(
                     create=True, size=shm_tensor.numel()
                 )
@@ -211,17 +252,19 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             ByteTensor of the checkpoint shard.
             A dict of checkpoint shard meta data.
         """
-        shm_handlers = {}
+        shm_handlers = []
         for rank in self.backup_ranks:
             if rank != self.rank:
-                if (rank not in self._rank_shms):
-                    shm_handler = SharedMemoryHandler(local_rank=rank)
+                if rank not in self._rank_shms:
+                    shm_handler = SharedMemoryHandler(
+                        local_rank=self.backup_shardids[rank], host=False
+                    )
                     shm_handler.init_shared_memory()
                 else:
                     shm_handler = self._rank_shms[rank]
             else:
                 shm_handler = self_shm_handler
-            shm_handlers[rank] = shm_handler
+            shm_handlers.append(shm_handler)
         shm_tensor, meta = self._gather_owner_checkpoint(shm_handlers)
         return shm_tensor, meta
 
@@ -235,7 +278,7 @@ class ShardCkptReplicaManager(CkptReplicaManger):
             if shm_handler.shared_memory:
                 assert shm_handler.shared_memory is not None
                 buffer = shm_handler.shared_memory.buf
-                meta_data = shm_handlers[rank].metadata.get()
+                meta_data = shm_handlers[i].metadata.get()
             else:
                 buffer = memoryview(b"")
                 meta_data = {}
