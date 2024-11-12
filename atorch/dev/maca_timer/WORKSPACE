@@ -1,0 +1,17 @@
+workspace(name="atorch")
+
+load("//third_party/brpc:brpc_workspace.bzl", "brpc_workspace")
+brpc_workspace();
+
+load("//third_party/maca:maca_workspace.bzl", "maca_workspace")
+maca_workspace();
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
+http_archive(
+    name = "com_github_jupp0r_prometheus_cpp",
+    sha256 = "909d8162a1b676fefc3bef1634151947c64cd8ae37e43b36df357c7881aa8782",
+    strip_prefix = "prometheus-cpp-1.2.4",
+    urls = ["https://github.com/jupp0r/prometheus-cpp/archive/v1.2.4.zip"],
+)
+load("@com_github_jupp0r_prometheus_cpp//bazel:repositories.bzl", "prometheus_cpp_repositories")
+prometheus_cpp_repositories()
