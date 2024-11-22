@@ -151,6 +151,7 @@ class GpuTimerManager {
 
   void stopWork() {
     should_run_.store(false);
+    working_queue_.stop();
     if (event_poller_.joinable()) {
       event_poller_.join();
     }

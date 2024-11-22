@@ -1,0 +1,15 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_test(
+    name = "integration_test",
+    srcs = ["integration_test.cc"],
+    copts = ["-Iexternal/googletest/include"],
+    linkstatic = True,
+    deps = [
+        "//xpu_timer",
+        "//xpu_timer:manager",
+        "//xpu_timer:util",
+        "@curl",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

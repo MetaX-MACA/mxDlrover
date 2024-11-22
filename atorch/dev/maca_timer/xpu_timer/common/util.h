@@ -29,6 +29,7 @@ class BlockingDeque {
   std::deque<T*> deque_;
   mutable std::mutex mutex_;
   std::condition_variable cond_var_;
+  bool stop_run_ = false;
 
  public:
   void push(T* valuePtr) {
@@ -40,11 +41,19 @@ class BlockingDeque {
 
   T* pop() {
     std::unique_lock<std::mutex> lock(mutex_);
-    cond_var_.wait(lock, [this] { return !deque_.empty(); });
+    cond_var_.wait(lock, [this] { return !deque_.empty() || stop_run_; });
+    if (stop_run_) return nullptr;
+  
     T* value_ptr = deque_.front();
     if (!value_ptr->isReady()) return nullptr;
     deque_.pop_front();
     return value_ptr;
+  }
+
+  void stop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    stop_run_ = true;
+    cond_var_.notify_one();
   }
 };
 
