@@ -56,7 +56,7 @@ def init_process(rank, size, fn, backend="nccl"):
 
 
 if __name__ == "__main__":
-    size = int(sys.args[2])
+    size = int(sys.argv[2])
     rank = int(sys.argv[1])
     os.environ["RANK"] = sys.argv[1]
     os.environ["WORLD_SIZE"] = str(size)
