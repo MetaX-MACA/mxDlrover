@@ -44,6 +44,9 @@ class PodScalerTest(unittest.TestCase):
     def test_init_pod_template(self):
         error_monitor = SimpleErrorMonitor()
         scaler = PodScaler("elasticjob-sample", "default", error_monitor)
+        scaler._check_master_service_avaliable = unittest.mock.MagicMock(
+            return_value=False
+        )
         scaler.start()
         self.assertEqual(
             scaler._distribution_strategy,
@@ -117,9 +120,10 @@ class PodScalerTest(unittest.TestCase):
         error_monitor = SimpleErrorMonitor()
         scaler = PodScaler("elasticjob-sample", "default", error_monitor)
         _dlrover_ctx.config_master_port()
-
+        scaler._check_master_service_avaliable = unittest.mock.MagicMock(
+            return_value=False
+        )
         scaler.start()
-        scaler._init_pod_config_by_job()
         scaler._distribution_strategy = DistributionStrategy.PS
         resource = NodeResource(4, 8192)
         node = Node(NodeType.WORKER, 0, resource, rank_index=0)
@@ -249,6 +253,9 @@ class PodScalerTest(unittest.TestCase):
 
     def test_scale_thread(self):
         scaler = PodScaler("elasticjob-sample", "default")
+        scaler._check_master_service_avaliable = unittest.mock.MagicMock(
+            return_value=False
+        )
         scaler.start()
         scaler._distribution_strategy = DistributionStrategy.PS
         resource = NodeResource(4, 8192)

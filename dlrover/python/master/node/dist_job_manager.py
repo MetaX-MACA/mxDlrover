@@ -76,7 +76,7 @@ from dlrover.python.master.watcher.factory import (
 )
 from dlrover.python.scheduler.factory import new_elastic_job
 from dlrover.python.scheduler.job import ElasticJob, JobArgs
-from dlrover.python.master.dragonfly.dragonfly_topo import DragonflyTopoManager
+from dlrover.python.master.dragonfly.dragonfly_topo_v2 import DragonflyV2TopoManager
 from dlrover.python.util import k8s_util
 
 _dlrover_context = Context.singleton_instance()
@@ -168,7 +168,7 @@ class DistributedJobManager(JobManager):
         )
         self._scaler: Scaler = job_scaler
         self._init_training_node_manager()
-        self._topo_manager = DragonflyTopoManager.singleton_instance(job_args.namespace)
+        self._topo_manager = DragonflyV2TopoManager.singleton_instance(job_args.namespace, job_args.job_name)
         self._enable_dragonfly = self._topo_manager.dragonfly_enable()
         self._error_monitor = error_monitor
 
@@ -1164,14 +1164,7 @@ class DistributedJobManager(JobManager):
         )
         if relaunch_node and node.relaunchable:
             if self._enable_dragonfly:
-                if level == TrainingExceptionLevel.NODE_ERROR:
-                    node_group: List[Node] = self._get_node_group(node)
-                    for member in node_group:
-                        if node != member:
-                            self._process_error(
-                                member, -1, "group err",
-                                TrainingExceptionLevel.NODE_ERROR,
-                            )
+                node_group: List[Node] = self._get_node_group(node)
                 self._relaunch_nodes(node, node_group)
             else:
                 self._relaunch_node(node)

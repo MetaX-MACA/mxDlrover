@@ -67,6 +67,18 @@ def _get_training_job(*args, **kwargs):
     job = yaml.safe_load(job_content)
     return job
 
+def get_dragonfly_job(*args, **kwargs):
+    if _is_local():
+        with open("data/elasticjob_dragonfly.yaml", "r") as f:
+            job_content = f.read()
+    else:
+        with open(
+            "dlrover/python/tests/data" "/elasticjob_dragonfly.yaml", "r"
+        ) as f:
+            job_content = f.read()
+    job = yaml.safe_load(job_content)
+    return job
+
 
 def _get_pod(name):
     pod = client.V1Pod(

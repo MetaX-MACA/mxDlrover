@@ -509,7 +509,7 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         node-1 if not available.
     """
 
-    def __init__(self, error_monitor=None, namespace=None):
+    def __init__(self, error_monitor=None, namespace=None, enable_dragonfly = False):
         super().__init__(error_monitor, namespace)
         self._name = RendezvousName.NETWORK_CHECK
         self._node_status: Dict[int, bool] = {}
@@ -519,6 +519,7 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         self._check_round = 2
         self._fault_nodes = set()
         self._straggler_nodes = set()
+        self._enable_dragonfly = enable_dragonfly
 
     def _get_print_node_groups(self):
         printing_node_groups = []
@@ -616,11 +617,22 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         node_groups: List[Dict[int, int]] = []
         if round == 0:
             group = {}
-            for node_id, meta in self._rdzv_nodes.items():
-                group[node_id] = meta
-                if len(group) == 2:
-                    node_groups.append(group)
+            if self._enable_dragonfly:
+                left, right = 0, len(self._rdzv_nodes) - 1
+                while right >= left:
                     group = {}
+                    group[left] = self._rdzv_nodes[left]
+                    group[right] = self._rdzv_nodes[right]
+                    if len(group) == 2:
+                        node_groups.append(group)
+                    left += 1
+                    right -= 1
+            else:
+                for node_id, meta in self._rdzv_nodes.items():
+                    group[node_id] = meta
+                    if len(group) == 2:
+                        node_groups.append(group)
+                        group = {}
             if len(group) == 1:
                 if len(node_groups) > 0:
                     node_groups[-1].update(group)

@@ -146,7 +146,8 @@ class DistributedJobMaster(JobMaster):
             ),
             networkCheck: NetworkCheckRendezvousManager(
                 error_monitor = error_monitor,
-                namespace = args.namespace
+                namespace = args.namespace,
+                enable_dragonfly = self.job_manager._enable_dragonfly
             ),
         }
         self.diagnosis_manager = DiagnosisManager()
