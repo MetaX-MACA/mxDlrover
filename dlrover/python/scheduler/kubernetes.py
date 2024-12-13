@@ -361,6 +361,7 @@ class k8sClient(Singleton):
         owner_ref = client.V1OwnerReference(
             api_version=api_version,
             block_owner_deletion=True,
+            controller=True,
             kind=kind,
             name=name,
             uid=uid,

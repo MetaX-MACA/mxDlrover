@@ -3,12 +3,6 @@
 # Declare variables to be passed into your templates.
 
 registry: "cr.metax-tech.com/cloud"
-
-# uses to assign pod group to node group
-groupScheduler:
-  enable: true # Controls whether dlrover enables group-scheduler func
-  per_group_num: "2" # Number of nodes per group in the topology
-  topo_key: "metax-tech.com/topology.nodegroup" # The k8s label key used to identify the topological relationship
     
 topoMapper:
   topology_config: |
@@ -16,23 +10,6 @@ topoMapper:
 controller:
   image:
     name: "elasticjob-controller"
-  tolerations:
-  - key: "node-role.kubernetes.io/master"
-    operator: "Exists"
-    effect: "NoSchedule"
-  - key: "node-role.kubernetes.io/control-plane"
-    operator: "Exists"
-    effect: "NoSchedule"
-  affinity:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: "node-role.kubernetes.io/master"
-            operator: "Exists"
-        - matchExpressions:
-          - key: "node-role.kubernetes.io/control-plane"
-            operator: "Exists"
 
 dlroverMaster:
   image:
