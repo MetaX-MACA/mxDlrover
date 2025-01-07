@@ -58,6 +58,7 @@ class ElasticRunTest(unittest.TestCase):
     def test_elastic_config_from_args(self):
         args = [
             "--network_check",
+            "--switchbox_check",
             "--comm_perf_test",
             "--auto_tunning",
             "--node_unit",
@@ -81,3 +82,6 @@ class ElasticRunTest(unittest.TestCase):
         import sys
         self.assertEqual(cmd, sys.executable)
         self.assertListEqual(cmd_args, ["-u", "test.py", "--batch_size", "16"])
+
+        self.assertTrue(config.switchbox_check)
+        self.assertEqual(config.box_pairs, [(0,1), (2, 4), (3, 5), (6, 7)])

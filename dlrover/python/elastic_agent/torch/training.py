@@ -24,7 +24,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 import subprocess
 
 import torch
@@ -162,6 +162,10 @@ class ElasticLaunchConfig(LaunchConfig):
     tee: Union[Std, Dict[int, Std]] = Std.NONE
     training_log_file: str = ""
     failure_node_errors: str = ""
+    switchbox_check: bool = False
+    box_pairs: Union[Std, List[Tuple[int, int]]] =  Std.NONE
+    min_bandwidth: int = 10000
+    min_channels: int = 2
 
     def set_node_unit(self, node_unit):
         """Set the number unit of nodes."""
@@ -1164,7 +1168,7 @@ class NodeCheckAgent(object):
                 recent_dmesg.append(line)
         return recent_dmesg
 
-    def run(self) -> bool:
+    def run(self, config) -> bool:
         logger.info("NodeCheckAgent run start")
         success = True
         dmesg_error = self._collect_dmesg()
@@ -1178,7 +1182,31 @@ class NodeCheckAgent(object):
         logger.info(
             f"NodeCheckAgent run end {success}"
         )
+
+        if config.switchbox_check:
+            success = _switchbox_check(config)
+            if not success:
+                self._client.report_failures(
+                    NodeErrorMessage.NETWORKER_ERROR,
+                    level=TrainingExceptionLevel.NODE_ERROR,
+                )
+                raise RuntimeError("The node has switch box error.")
+
         return success
+
+def _switchbox_check(config: ElasticLaunchConfig,) -> bool:
+    box_pairs_format = [f"{t[0]}:{t[1]}" for t in config.box_pairs]
+    cmd_args = ["python3", "-m", "dlrover.trainer.torch.node_check.switch_box", "--pairs"]
+    cmd_args += box_pairs_format
+    cmd_args += ["--min-channels", f"{config.min_channels}", "--min-bandwidth", f"{config.min_bandwidth}"]
+    result = subprocess.run(
+        cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    if 0 != result.returncode:
+        logger.error(f"switchbox_check failed. output {result.stdout} error {result.stderr} ")
+        return False
+    logger.info(f"switchbox_check successed. output {result.stdout}")
+    return True
 
 def _create_check_agent(
     config: ElasticLaunchConfig,
@@ -1284,6 +1312,13 @@ def run_network_check(config: ElasticLaunchConfig, entrypoint):
     else:
         logger.warning(f"Unsupported accelerator chip {config.accelerator}.")
         return True
+    if config.switchbox_check:
+        env_conf = os.getenv("NCCL_SETTINGS", "")
+        if env_conf != "":
+            env_conf +=  ","
+        env_conf += "MCCL_DISABLE_OPTIC_LINK=1"
+        os.environ['NCCL_SETTINGS'] = env_conf
+
     for _ in range(2):
         # If network fails because other abnormal node, We
         # will retry to check network after the new node is starting.
@@ -1308,7 +1343,7 @@ def run_node_check(config: ElasticLaunchConfig, entrypoint):
         return True
 
     agent = NodeCheckAgent()
-    success = agent.run()
+    success = agent.run(config)
     if success:
         logger.info("Node check passed.")
         return success
