@@ -94,7 +94,6 @@ import time
 import uuid
 from datetime import datetime
 from typing import Callable, List, Tuple, Union
-import argparse
 
 from torch.distributed.argparse_util import check_env, env
 from torch.distributed.elastic.multiprocessing.api import SubprocessHandler
@@ -121,13 +120,6 @@ from dlrover.python.elastic_agent.torch.training import (
     launch_agent,
 )
 from dlrover.trainer.torch.utils import version_less_than_230
-
-def parse_int_pair(pair_str):
-    try:
-        a, b = pair_str.split(':')
-        return (int(a), int(b))
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"{pair_str} is not a valid pair of integers separated by ':'")
 
 
 def parse_args(args):
@@ -198,37 +190,6 @@ def parse_args(args):
         action=env,
         default=60000,
         help="The start of training port.",
-    )
-    parser.add_argument(
-        "--switchbox-check",
-        "--switchbox_check",
-        action=check_env,
-        help="Whether to check switchbox before starting training process.",
-    )
-    parser.add_argument(
-        "--box-pairs",
-        "--box_pairs'",
-        metavar="PAIR",
-        type=parse_int_pair,
-        nargs="+",
-        default=[(0, 1), (2, 4), (3, 5), (6, 7)],
-        help="an array of pairs of integers separated by colons",
-    )
-    parser.add_argument(
-        "--min-bandwidth",
-        "--min_bandwidth",
-        type=int,
-        action=env,
-        default=10000,
-        help="The minimal bandwith (MB/s) of switchbox to GPU.",
-    )
-    parser.add_argument(
-        "--min-channels",
-        "--min_channels",
-        type=int,
-        action=env,
-        default=2,
-        help="The minimal pass channels of switchbox to GPU.",
     )
     return parser.parse_args(args)
 
@@ -368,12 +329,6 @@ def _elastic_config_from_args(
     elastic_config.rdzv_endpoint = ""
     join_timeout = elastic_config.rdzv_configs.get("join_timeout", 600)
     elastic_config.rdzv_configs["timeout"] = join_timeout
-
-    elastic_config.switchbox_check = getattr(args, "switchbox_check", False)
-    elastic_config.box_pairs = getattr(args, "box_pairs", [(0,1), (2, 4), (3, 5), (6, 7)])
-    elastic_config.min_bandwidth = getattr(args, "min_bandwidth", 10000)
-    elastic_config.min_channels = getattr(args, "min_channels", 2)
-    
     return elastic_config, cmd, cmd_args
 
 
