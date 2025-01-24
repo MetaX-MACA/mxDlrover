@@ -48,7 +48,11 @@ class ColossalAICheckpointEngine(CheckpointEngine):
         global_shard_num = self.get_global_shard_num()
         self._local_shard_num = max(1, global_shard_num // device_number)
         super().__init__(
-            checkpoint_dir, storage, comm_backend, self._pp_rank % self._local_shard_num
+            checkpoint_dir,
+            storage,
+            comm_backend,
+            replica_count=0,
+            local_shard_id=self._pp_rank % self._local_shard_num,
         )
 
     def get_saving_ranks(self):
