@@ -311,58 +311,53 @@ def main():
 
     timer = Timer()
     start_step = 0
-    if isinstance(plugin, HybridParallelPlugin) and args.pp > 1:
-        # The forward backward of PP should be handled in a special way.
-        if args.load_checkpoint is not None:
-            timer.start()
-            if "modeling" in args.load_checkpoint:
-                coordinator.print_on_master(f"Continued pretrain from checkpoint {args.load_checkpoint}")
-                booster.load_model(model, args.load_checkpoint)
-            else:
-                coordinator.print_on_master(f"Load model checkpoint from {args.load_checkpoint}")
-                start_epoch, start_step, sampler_start_idx = load_checkpoint(
-                    load_dir=args.load_checkpoint,
-                    booster=booster,
-                    model=model,
-                    optimizer=optimizer,
-                    lr_scheduler=lr_scheduler,
-                )
-                coordinator.print_on_master(
-                    f"Loaded checkpoint {args.load_checkpoint} at epoch {start_epoch} step {start_step}"
-                )
-                coordinator.print_on_master(f"Loaded sample at index {sampler_start_idx}")
-                # dataloader.sampler.set_start_index(start_index=sampler_start_idx)
-            timer.end()
-            coordinator.print_on_master(f"Load time {timer.duration}")
-        optimizer.zero_grad()
 
-        # check if model weight contains nan
-        # for name, param in model.named_parameters():
-        #     if torch.isnan(param).any():
-        #         raise ValueError(f"Model weight contains nan at {name}")
-
-        if args.empty_cache:
-            torch.cuda.empty_cache()
-        step = start_step
-        i = start_step
-        epoch = 1
-        coordinator.print_on_master("\nStart saving model checkpoint with running states")
+    if args.load_checkpoint is not None:
         timer.start()
-        save_checkpoint(
-            save_dir=args.save_dir,
-            booster=booster,
-            model=model,
-            optimizer=optimizer,
-            lr_scheduler=lr_scheduler,
-            epoch=1,
-            step=i + 1,
-            batch_size=args.batch_size,
-            coordinator=coordinator,
-        )
+        if "modeling" in args.load_checkpoint:
+            coordinator.print_on_master(f"Continued pretrain from checkpoint {args.load_checkpoint}")
+            booster.load_model(model, args.load_checkpoint)
+        else:
+            coordinator.print_on_master(f"Load model checkpoint from {args.load_checkpoint}")
+            start_epoch, start_step, sampler_start_idx = load_checkpoint(
+                load_dir=args.load_checkpoint,
+                booster=booster,
+                model=model,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+            )
+            coordinator.print_on_master(
+                f"Loaded checkpoint {args.load_checkpoint} at epoch {start_epoch} step {start_step}"
+            )
+            coordinator.print_on_master(f"Loaded sample at index {sampler_start_idx}")
+            # dataloader.sampler.set_start_index(start_index=sampler_start_idx)
         timer.end()
-        coordinator.print_on_master(
-            f"Saved checkpoint at epoch {epoch} step {step + 1} at folder {args.save_dir} with {timer.duration}s"
-        )
+        coordinator.print_on_master(f"Load time {timer.duration}")
+    optimizer.zero_grad()
+
+
+    if args.empty_cache:
+        torch.cuda.empty_cache()
+    step = start_step
+    i = start_step
+    epoch = 1
+    coordinator.print_on_master("\nStart saving model checkpoint with running states")
+    timer.start()
+    save_checkpoint(
+        save_dir=args.save_dir,
+        booster=booster,
+        model=model,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        epoch=1,
+        step=i + 1,
+        batch_size=args.batch_size,
+        coordinator=coordinator,
+    )
+    timer.end()
+    coordinator.print_on_master(
+        f"Saved checkpoint at epoch {epoch} step {step + 1} at folder {args.save_dir} with {timer.duration}s"
+    )
 
     optimizer.zero_grad()
 

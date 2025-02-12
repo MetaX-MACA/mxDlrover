@@ -30,6 +30,7 @@ try:
     from colossalai.booster import Booster
     from colossalai.cluster import DistCoordinator
     from colossalai.checkpoint_io import CheckpointIO, HybridParallelCheckpointIO
+    from colossalai.booster.plugin.low_level_zero_plugin import LowLevelZeroCheckpointIO
 except ImportError:
     logger.warning("Please check the colossalai.checkpoint_io exists.")
 
@@ -108,18 +109,26 @@ def save_checkpoint(
     Save model checkpoint, optimizer, LR scheduler and intermedidate running states.
     """
 
-    if not isinstance(booster.checkpoint_io, HybridParallelCheckpointIO):
-        logger.warning("Only support HybridParallelCheckpointIO checkpoint")
+    if not isinstance(booster.checkpoint_io, HybridParallelCheckpointIO) and \
+        not isinstance(booster.checkpoint_io, LowLevelZeroCheckpointIO):
+        logger.warning("Only support HybridParallelCheckpointIO & LowLevelZeroCheckpointIO checkpoint")
         sys.exit()
 
     root_dir = save_dir
     save_dir = os.path.join(save_dir, f"step-{step}")
     os.makedirs(os.path.join(save_dir, "modeling"), exist_ok=True)
-    saver = ColossalAICheckpointer.singleton_instance(
-        root_dir,
-        pp_rank=booster.checkpoint_io.pp_rank,
-        pp_size=booster.checkpoint_io.pp_size,
-    )
+    if isinstance(booster.checkpoint_io, HybridParallelCheckpointIO):
+        saver = ColossalAICheckpointer.singleton_instance(
+            root_dir,
+            pp_rank=booster.checkpoint_io.pp_rank,
+            pp_size=booster.checkpoint_io.pp_size,
+        )
+    else:
+        saver = ColossalAICheckpointer.singleton_instance(
+            root_dir,
+            pp_rank=0,
+            pp_size=1
+        )
 
     try:
         torch.save = saver.save
@@ -155,15 +164,24 @@ def load_checkpoint(
     Load model checkpoint, optimizer, LR scheduler and intermedidate running states.
     """
 
-    if not isinstance(booster.checkpoint_io, HybridParallelCheckpointIO):
-        logger.warning("Only support HybridParallelCheckpointIO checkpoint")
+    if not isinstance(booster.checkpoint_io, HybridParallelCheckpointIO) and \
+        not isinstance(booster.checkpoint_io, LowLevelZeroCheckpointIO):
+        logger.warning("Only support HybridParallelCheckpointIO & LowLevelZeroCheckpointIO checkpoint")
         sys.exit()
 
-    checkpointer = ColossalAICheckpointer.singleton_instance(
-        load_dir,
-        pp_rank=booster.checkpoint_io.pp_rank,
-        pp_size=booster.checkpoint_io.pp_size,
-    )
+    if isinstance(booster.checkpoint_io, HybridParallelCheckpointIO):
+        checkpointer = ColossalAICheckpointer.singleton_instance(
+            load_dir,
+            pp_rank=booster.checkpoint_io.pp_rank,
+            pp_size=booster.checkpoint_io.pp_size,
+        )
+    else:
+        checkpointer = ColossalAICheckpointer.singleton_instance(
+            load_dir,
+            pp_rank=0,
+            pp_size=1
+        )
+
     dlrover_tracer_file = os.path.join(
         checkpointer.checkpoint_dir, CheckpointConstant.TRACER_FILE_NAME
     )
