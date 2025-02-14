@@ -102,6 +102,7 @@ def main():
     exec_path = os.getenv("SWITCHBOX_CHECK_TOOL_PATH", "/opt/mxmap/bin/mxom-client")
 
     # 输入box
+    global cpu_nodes
     cpu_nodes = get_num_cpu_nodes()
     gpu_ip_map = get_gpu_id_map()
     processes = []
