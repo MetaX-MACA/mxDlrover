@@ -13,7 +13,7 @@
 # limitations under the License.
 
 pip install kubernetes
-pip install grpcio-tools
+pip install grpcio-tools==1.58
 pip install psutil
 pip install deprecated
 pip install 'ray[default]'
