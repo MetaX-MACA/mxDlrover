@@ -36,7 +36,7 @@ Run in the worker Pod with GPU of ElasticJob.
 auto-config will set the nnodes as the number of nodes in a job,
 nproc_per_node as the number of available GPUs. If the number of
 nodes >= 4, it will set the network-check as True. If network-check is True,
-dlrover-run will launch simple tasks on each node to check wether
+dlrover-run will launch simple tasks on each node to check whether
 the node is slow or fault.
 
 Single-node multi-worker
@@ -134,16 +134,16 @@ def parse_args(args):
     parser = get_args_parser()
     parser.allow_abbrev = False
     parser.add_argument(
-        "--network-check",
-        "--network_check",
-        action=check_env,
-        help="Whether to check network before starting training process.",
-    )
-    parser.add_argument(
-        "--comm-perf-test",
-        "--comm_perf_test",
-        action=check_env,
-        help="Whether to test the communication performance.",
+        "--precheck",
+        type=int,
+        action=env,
+        default=0,
+        choices=[0, 1, 2],
+        help="The level to check the node before starting the training task."
+        "Default 0 dose not run check task; the value 1 splits nodes into "
+        "groups to runs a matmul and allgather task and each group has 2 "
+        "nodes; the value 2 will run an allgather task with all nodes to "
+        "test the performance.",
     )
     parser.add_argument(
         "--node_unit",
@@ -165,7 +165,7 @@ def parse_args(args):
         "--auto_tunning",
         "--auto-tunning",
         action=check_env,
-        help="Whether to auto-tune the parallel configuraion.",
+        help="Whether to auto-tune the parallel configuration.",
     )
     parser.add_argument(
         "--exclude-straggler",
@@ -230,6 +230,26 @@ def parse_args(args):
         default=2,
         help="The minimal pass channels of switchbox to GPU.",
     )
+    parser.add_argument(
+        "--numa-affinity",
+        "--numa_affinity",
+        action=check_env,
+        help="bool, set workers processes cpu numa affinity or not",
+    )
+
+    # deprecated arguments
+    parser.add_argument(
+        "--network-check",
+        "--network_check",
+        action=check_env,
+        help="Whether to check network before starting training process.",
+    )
+    parser.add_argument(
+        "--comm-perf-test",
+        "--comm_perf_test",
+        action=check_env,
+        help="Whether to test the communication performance.",
+    )
     return parser.parse_args(args)
 
 
@@ -282,7 +302,7 @@ class elastic_launch:
 
 
 def _launch_dlrover_local_master(master_addr, job_name, node_num):
-    """Launch a subprocess to run the DLrover master."""
+    """Launch a subprocess to run the DLRover master."""
     logger.info(f"Start dlrover master with addr {master_addr}")
     if not master_addr:
         host = "127.0.0.1"
@@ -343,27 +363,62 @@ def _elastic_config_from_args(
     args,
 ) -> Tuple[ElasticLaunchConfig, Union[Callable, str], List[str]]:
     config, cmd, cmd_args = config_from_args(args)
+
+    master_config = _elastic_config_from_master(config)
     elastic_config = ElasticLaunchConfig(**config.__dict__)
 
     # PyTorch >= 2.3.0 remove log_dir in the LaunchConfig.
     if not version_less_than_230():
         elastic_config.log_dir = config.logs_specs.root_log_dir
+
+    elastic_config.precheck = getattr(args, "precheck", False)
+    if master_config.precheck:
+        logger.info("Enable precheck by master")
+        elastic_config.precheck = master_config.precheck
+
     elastic_config.network_check = getattr(args, "network_check", False)
+    if master_config.network_check:
+        logger.info("Enable network checking by master")
+        elastic_config.network_check = True
+
     elastic_config.comm_perf_test = getattr(args, "comm_perf_test", False)
+    if master_config.comm_perf_test:
+        logger.info("Enable comm_perf_test by master")
+        elastic_config.comm_perf_test = True
+
+    elastic_config.numa_affinity = getattr(args, "numa_affinity", False)
+    if master_config.numa_affinity:
+        logger.info("Enable numa affinity by master")
+        elastic_config.numa_affinity = True
+
     elastic_config.auto_tunning = getattr(args, "auto_tunning", False)
+    if master_config.auto_tunning:
+        logger.info("Enable auto_tunning by master")
+        elastic_config.auto_tunning = True
+
     elastic_config.auto_config = getattr(args, "auto_config", False)
+    if master_config.auto_config:
+        logger.info("Enable auto_config by master")
+        elastic_config.auto_config = True
+
     elastic_config.accelerator = getattr(
         args, "accelerator", Accelerators.NVIDIA_GPU
     )
+
     elastic_config.exclude_straggler = getattr(
         args, "exclude_straggler", False
     )
+    if master_config.exclude_straggler:
+        elastic_config.exclude_straggler = True
     elastic_config.set_node_unit(getattr(args, "node_unit", 1))
     elastic_config.training_port = getattr(args, "training_port", 60000)
     elastic_config.save_at_breakpoint = getattr(
         args, "save_at_breakpoint", False
     )
+    if master_config.save_at_breakpoint:
+        elastic_config.save_at_breakpoint = True
     elastic_config.auto_configure_params()
+    elastic_config.update_precheck_args()
     elastic_config.rdzv_backend = "dlrover-master"
     elastic_config.rdzv_endpoint = ""
     join_timeout = elastic_config.rdzv_configs.get("join_timeout", 600)
@@ -377,6 +432,48 @@ def _elastic_config_from_args(
     elastic_config.min_channels = getattr(args, "min_channels", 2)
 
     return elastic_config, cmd, cmd_args
+
+
+def _elastic_config_from_master(config) -> ElasticLaunchConfig:
+    elastic_config = ElasticLaunchConfig(**config.__dict__)
+
+    _client = MasterClient.singleton_instance()
+    try:
+        logger.info("try to get elastic run config from master")
+        master_configs = _client.get_elastic_run_config()
+    except Exception as e:
+        logger.error(f"fail to get elastic config from master: {e}")
+        master_configs = {}
+
+    elastic_config.network_check = False
+    if "network_check" in master_configs:
+        elastic_config.network_check = True
+
+    elastic_config.comm_perf_test = False
+    if "comm_perf_test" in master_configs:
+        elastic_config.comm_perf_test = True
+
+    elastic_config.auto_tunning = False
+    if "auto_tunning" in master_configs:
+        elastic_config.auto_tunning = True
+
+    elastic_config.auto_config = False
+    if "auto_config" in master_configs:
+        elastic_config.auto_config = True
+
+    elastic_config.exclude_straggler = False
+    if "exclude_straggler" in master_configs:
+        elastic_config.exclude_straggler = True
+
+    elastic_config.save_at_breakpoint = False
+    if "save_at_breakpoint" in master_configs:
+        elastic_config.save_at_breakpoint = True
+
+    elastic_config.numa_affinity = False
+    if "numa_affinity" in master_configs:
+        elastic_config.numa_affinity = True
+
+    return elastic_config
 
 
 def _check_to_use_dlrover_run(master_addr, max_nodes, timeout=120):

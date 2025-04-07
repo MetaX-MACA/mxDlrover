@@ -21,9 +21,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 from kubernetes import client
 
+from dlrover.python.common.serialize import JsonSerializable
+
 
 @dataclass
-class NodeTopologyMeta(object):
+class NodeTopologyMeta(JsonSerializable):
     node_id: int = 0
     node_rank: int = 0
     process_num: int = 0

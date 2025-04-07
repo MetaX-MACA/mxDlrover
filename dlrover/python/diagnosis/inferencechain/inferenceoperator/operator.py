@@ -12,10 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dlrover.python.diagnosis.inferencechain.inferenceoperator.check_failure_node_operator import (  # noqa: E501
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.observer.check_failure_node_operator import (  # noqa: E501
     CheckFailureNodeOperator,
+)
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.observer.check_resource_collection_operator import (  # noqa: E501
+    CheckResourceCollectionOperator,
+)
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.observer.metrics_collection_operator import (  # noqa: E501
+    MetricsCollectionOperator,
+)
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.observer.resource_collection_operator import (  # noqa: E501
+    ResourceCollectionOperator,
+)
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.resolver.resolve_gpu_errors_operator import (  # noqa: E501
+    ResolveGPUErrorsOperator,
 )
 
 
 def get_training_failure_operators():
     return [CheckFailureNodeOperator()]
+
+
+def get_worker_observe_operators():
+    return [
+        MetricsCollectionOperator(),
+        CheckResourceCollectionOperator(),
+        ResourceCollectionOperator(),
+    ]
+
+
+def get_worker_resolve_operators():
+    return [
+        ResolveGPUErrorsOperator(),
+    ]

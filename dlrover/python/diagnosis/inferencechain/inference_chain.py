@@ -37,7 +37,7 @@ class InferenceChain:
         self.operators = operators
 
     def infer(self) -> List[Inference]:
-        logger.info(f"Infer {self.inferences}")
+        logger.debug(f"Infer {self.inferences}")
         inferences = self.inferences
         while True:
             has_new_inference = False
@@ -47,7 +47,7 @@ class InferenceChain:
                     operator = self.get_operator(inference)
                     if not operator:
                         continue
-                    infs = operator.infer(inferences)
+                    infs = operator.infer([inference])
                     if len(infs) > 0:
                         has_new_inference = True
                         new_infs = combine_inferences(new_infs, infs)
@@ -67,5 +67,5 @@ class InferenceChain:
         for operator in self.operators:
             if operator.is_compatible(inference):
                 return operator
-        logger.info(f"No operator for inference: {inference.__dict__}")
+        logger.debug(f"No operator for inference: {inference.__dict__}")
         return None  # type: ignore

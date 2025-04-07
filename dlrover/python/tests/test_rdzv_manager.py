@@ -60,6 +60,26 @@ class MasterKVStoreTest(unittest.TestCase):
         except Exception as e:
             self.assertIsInstance(e, LookupError)
 
+    def test_kv_store_timeout(self):
+        kv_store = MasterKVStore("dlrover/torch/test")
+        key1 = "alpha"
+        key2 = "beta"
+        key3 = "omega"
+        kv_store.set(key1, "1".encode())
+        kv_store.set(key2, "2".encode())
+        kv_store.wait([key1, key2])
+
+        kv_store.set_timeout(datetime.timedelta(seconds=1))
+        try:
+            kv_store.wait([key1, key2, key3])
+        except Exception as e:
+            self.assertIsInstance(e, LookupError)
+
+        try:
+            kv_store.get(key3)
+        except Exception as e:
+            self.assertIsInstance(e, LookupError)
+
 
 class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
     def test_max_nodes(self):
@@ -173,23 +193,24 @@ class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
         rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
 
         rdzv_manager._rdzv_params.min_nodes = 4
+        rdzv_manager._rdzv_params.max_nodes = 4
         rdzv_manager._waiting_nodes = {0: 0, 1: 1, 2: 2, 3: 3}
         self.assertEqual(rdzv_manager._get_lacking_ranks(), [])
 
-        rdzv_manager._rdzv_params.min_nodes = 5
+        rdzv_manager._rdzv_params.max_nodes = 5
         self.assertEqual(rdzv_manager._get_lacking_ranks(), [4])
 
-        rdzv_manager._rdzv_params.min_nodes = 3
+        rdzv_manager._rdzv_params.max_nodes = 3
         self.assertEqual(rdzv_manager._get_lacking_ranks(), [])
 
-        rdzv_manager._rdzv_params.min_nodes = 6
+        rdzv_manager._rdzv_params.max_nodes = 6
         self.assertEqual(rdzv_manager._get_lacking_ranks(), [4, 5])
 
-        rdzv_manager._rdzv_params.min_nodes = 4
+        rdzv_manager._rdzv_params.max_nodes = 4
         rdzv_manager._waiting_nodes = {}
         self.assertEqual(rdzv_manager._get_lacking_ranks(), [0, 1, 2, 3])
 
-        rdzv_manager._rdzv_params.min_nodes = 0
+        rdzv_manager._rdzv_params.max_nodes = 0
         self.assertEqual(rdzv_manager._get_lacking_ranks(), [])
 
     def test_multi_updating_waiting_nodes(self):

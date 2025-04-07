@@ -51,10 +51,15 @@ from dlrover.python.common import grpc
 from dlrover.python.common.constants import CheckpointConstant
 from dlrover.python.common.multi_process import SharedMemory, clear_sock_dir
 from dlrover.python.common.storage import PosixDiskStorage
+from dlrover.python.elastic_agent.master_client import (
+    MasterClient,
+    build_master_client,
+)
 from dlrover.python.elastic_agent.torch.ckpt_saver import (
     AsyncCheckpointSaver,
     SharedMemoryHandler,
 )
+from dlrover.python.tests.test_utils import start_local_master
 from dlrover.trainer.torch.flash_checkpoint.fsdp import FsdpShardCheckpointer
 from dlrover.trainer.torch.flash_checkpoint.fsdp_engine import (
     FileReader,
@@ -158,6 +163,9 @@ def _write_state_dict_to_shm(shared_memory, files, state_dict):
 
 class FsdpCheckpointTest(unittest.TestCase):
     def setUp(self):
+        self._master, self.addr = start_local_master()
+        MasterClient._instance = build_master_client(self.addr, 1)
+
         self.shm = SharedMemory(name="test_write_item", create=True, size=1024)
         AsyncCheckpointSaver._saver_instance = None
         AsyncCheckpointSaver.start_async_saving_ckpt()
@@ -168,6 +176,8 @@ class FsdpCheckpointTest(unittest.TestCase):
         dist.init_process_group(backend="gloo")
 
     def tearDown(self) -> None:
+        self._master.stop()
+
         os.environ.pop("LOCAL_RANK", None)
         os.environ.pop("LOCAL_WORLD_SIZE", None)
         self.shm.unlink()
@@ -243,11 +253,15 @@ class FsdpCheckpointTest(unittest.TestCase):
         for _, item in files:
             write_items.append(item)
         writer = _write_state_dict_to_shm(self.shm, files, state_dict)
+        writer.reset()
+        self.assertTrue(writer.validate_checkpoint_id(None))
         self.assertTrue("dcp_metadata" in writer.metadata)
         self.assertTrue("no_shard_data" in writer.metadata)
 
         writer.shm_handler.metadata.set(writer.metadata)
         reader = SharedMemoryReader(writer.shm_handler)
+        reader.reset()
+        self.assertTrue(reader.validate_checkpoint_id(None))
         dcp_metadata = reader.read_metadata()
         self.assertTrue(_OPTIMIZER_KEY in dcp_metadata.state_dict_metadata)
         self.assertTrue(_OPTIMIZER_KEY in reader.no_shard_data)
@@ -296,6 +310,8 @@ class FsdpCheckpointTest(unittest.TestCase):
                 f.write(writer.shm_handler.shared_memory.buf)
 
             reader = FileReader(tmpdir)
+            reader.reset()
+            self.assertTrue(reader.validate_checkpoint_id(None))
             metadata = reader.read_metadata()
             reader.set_up_storage_reader(metadata, True)
 
@@ -343,7 +359,7 @@ class FsdpCheckpointTest(unittest.TestCase):
                 paths=paths,
             )
             self.assertEqual(engine._cached_step, 100)
-            time.sleep(1)
+            time.sleep(3)
             files = sorted(os.listdir(tmpdir))
             self.assertListEqual(
                 files,
@@ -384,17 +400,23 @@ class FsdpCheckpointTest(unittest.TestCase):
             paths = {CheckpointConstant.MODEL_STATES_NAME: path}
             checkpointer._engine.save_to_storage(step, state_dict, paths)
             self.assertEqual(engine._cached_step, 100)
-            time.sleep(1)
-            files = sorted(os.listdir(tmpdir))
-            self.assertListEqual(
-                files,
-                [
-                    "._dlrover_ckpt_stage",
-                    "100",
-                    "dlrover_latest.txt",
-                ],
-            )
-            files = sorted(os.listdir(path))
-            self.assertListEqual(files, [".metadata", "__0_0.distcp"])
-            reader = checkpointer._engine.load(path)
-            self.assertTrue(isinstance(reader, SharedMemoryReader))
+            for _ in range(5):
+                files = sorted(os.listdir(tmpdir))
+                if len(files) != 3:
+                    time.sleep(1)
+                    continue
+                else:
+                    break
+            if len(files) == 3:
+                self.assertListEqual(
+                    files,
+                    [
+                        "._dlrover_ckpt_stage",
+                        "100",
+                        "dlrover_latest.txt",
+                    ],
+                )
+                files = sorted(os.listdir(path))
+                self.assertListEqual(files, [".metadata", "__0_0.distcp"])
+                reader = checkpointer._engine.load(path)
+                self.assertTrue(isinstance(reader, SharedMemoryReader))

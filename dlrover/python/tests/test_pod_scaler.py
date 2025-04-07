@@ -16,6 +16,7 @@ import os
 import time
 import unittest
 from collections import deque
+from unittest import mock
 
 from dlrover.python.common.constants import (
     DistributionStrategy,
@@ -41,11 +42,14 @@ class PodScalerTest(unittest.TestCase):
         os.environ["POD_IP"] = "127.0.0.1"
         mock_k8s_client()
 
+    def tearDown(self) -> None:
+        os.environ.clear()
+
     def test_init_pod_template(self):
         error_monitor = SimpleErrorMonitor()
         scaler = PodScaler("elasticjob-sample", "default", error_monitor)
-        scaler._check_master_service_avaliable = unittest.mock.MagicMock(
-            return_value=False
+        scaler._check_master_service_avaliable = mock.MagicMock(
+            return_value=True
         )
         scaler.start()
         self.assertEqual(
@@ -79,16 +83,16 @@ class PodScalerTest(unittest.TestCase):
         else:
             wrong_port = 22222
         passed = scaler._check_master_service_avaliable(
-            "elasticjob-test-master", wrong_port, 2
+            "elasticjob-test-master", wrong_port, 1
         )
         self.assertFalse(passed)
 
         passed = scaler._check_master_service_avaliable(
-            "localhost", wrong_port, 2
+            "localhost", wrong_port, 1
         )
         self.assertFalse(passed)
 
-        passed = scaler._check_master_service_avaliable("localhost", port, 2)
+        passed = scaler._check_master_service_avaliable("localhost", port, 1)
         self.assertFalse(passed)
 
     def test_periodic_create_pod(self):
@@ -119,6 +123,9 @@ class PodScalerTest(unittest.TestCase):
     def test_create_pod(self):
         error_monitor = SimpleErrorMonitor()
         scaler = PodScaler("elasticjob-sample", "default", error_monitor)
+        scaler._check_master_service_avaliable = mock.MagicMock(
+            return_value=True
+        )
         _dlrover_ctx.config_master_port()
         scaler._check_master_service_avaliable = unittest.mock.MagicMock(
             return_value=False
@@ -253,8 +260,8 @@ class PodScalerTest(unittest.TestCase):
 
     def test_scale_thread(self):
         scaler = PodScaler("elasticjob-sample", "default")
-        scaler._check_master_service_avaliable = unittest.mock.MagicMock(
-            return_value=False
+        scaler._check_master_service_avaliable = mock.MagicMock(
+            return_value=True
         )
         scaler.start()
         scaler._distribution_strategy = DistributionStrategy.PS

@@ -13,6 +13,7 @@
 
 import json
 import os
+import random
 import unittest
 from datetime import timedelta
 
@@ -32,14 +33,15 @@ class TestNetworkCheckScript(unittest.TestCase):
 
     def tearDown(self):
         # Cleanup code to run after each test method
-        pass
+        os.environ.clear()
 
     def test_gpu_node_check(self):
+        port = random.randint(10000, 40000)
         os.environ["RANK"] = "0"
         os.environ["WORLD_SIZE"] = "1"
         os.environ["LOCAL_RANK"] = "0"
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12345"
+        os.environ["MASTER_PORT"] = str(port)
         t = gpu_main()
         self.assertTrue(t > 0)
         with open("/tmp/dlrover/network_check/0.txt", "r") as f:

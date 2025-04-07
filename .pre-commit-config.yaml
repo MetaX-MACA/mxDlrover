@@ -1,5 +1,5 @@
 ---
-exclude: '^atorch/|^tfplus/'
+exclude: '^atorch/|^tfplus/^|xpu_timer/'
 repos:
   - repo: https://github.com/pre-commit/mirrors-isort
     rev: v5.10.1
@@ -14,11 +14,13 @@ repos:
     rev: v2.2.3
     hooks:
       - id: flake8
+        exclude: dlrover/proto/
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v0.812
     hooks:
       - id: mypy
         args: [--ignore-missing-imports, --follow-imports=skip]
+        exclude: dlrover/proto/
   - repo: local
     hooks:
       - id: clang-format
@@ -27,7 +29,6 @@ repos:
         entry: bash ./scripts/codestyle/clang_format.hook -i
         language: system
         files: \.(c|cc|cxx|cpp|cu|h|hpp|hxx|proto)$
-        exclude: dlrover/go/brain/vendor
   - repo: local
     hooks:
       - id: cpplint-cpp-source
@@ -36,20 +37,16 @@ repos:
         entry: bash ./scripts/codestyle/cpplint_precommit.hook
         language: system
         files: \.(c|cc|cxx|cpp|cu|h|hpp|hxx)$
-        exclude: dlrover/go/brain/vendor
   - repo: https://github.com/dnephin/pre-commit-golang.git
     rev: v0.3.3
     hooks:
       - id: go-fmt
-        exclude: dlrover/go/brain/vendor
       - id: go-lint
-        exclude: dlrover/go/brain/vendor
       - id: no-go-testing
   - repo: https://github.com/gruntwork-io/pre-commit
     rev: v0.1.8
     hooks:
       - id: shellcheck
-        exclude: dlrover/go/brain/vendor
         files: \.(sh)$
   - repo: local
     hooks:
@@ -64,15 +61,4 @@ repos:
     hooks:
       - id: yamllint
         exclude:
-          (dlrover/python/tests/data|operator/config)
-#  - repo: https://github.com/igorshubovych/markdownlint-cli
-#    rev: v0.35.0
-#    hooks:
-#      - id: markdownlint
-#        name: markdownlint
-#        description: "Checks the style of Markdown files."
-#        entry: markdownlint --fix --config .markdownlint.yaml
-#        language: node
-#        types: [markdown]
-#        exclude: (dlrover/go/brain/vendor)
-        # args: [--fix]
+          (dlrover/python/tests/data|go/elasticjob/config)

@@ -25,7 +25,11 @@ import torch.distributed as dist
 from dlrover.python.common import env_utils
 from dlrover.python.common.constants import CheckpointConstant
 from dlrover.python.common.log import default_logger as logger
-from dlrover.python.common.multi_process import SharedLock, SharedQueue
+from dlrover.python.common.multi_process import (
+    LocalSocketComm,
+    SharedLock,
+    SharedQueue,
+)
 from dlrover.python.common.singleton import Singleton
 from dlrover.python.common.storage import CheckpointStorage
 from dlrover.python.elastic_agent.torch.ckpt_saver import (
@@ -134,6 +138,21 @@ def start_saver_process():
     return None
 
 
+def wait_socket_server(socket_server: LocalSocketComm, timeout=60):
+    """
+    Socket client should not be used before socket server is created.
+    """
+
+    start_time = time.time()
+    while not socket_server.is_available():
+        time.sleep(0.1)
+        if time.time() - start_time > timeout:
+            raise TimeoutError(
+                "Timed out waiting for socket server: "
+                f"{socket_server.name}."
+            )
+
+
 class CheckpointEngine(metaclass=ABCMeta):
     """
     The checkpoint engine synchronously writes the state dict into
@@ -145,7 +164,7 @@ class CheckpointEngine(metaclass=ABCMeta):
     the training loop and call `save_to_storage`.
 
     If the training process fail, the agent in main process can continuously
-    saves the state dict from the shared memory into the storage.
+    save the state dict from the shared memory into the storage.
 
     Args:
         checkpoint_dir (str): the directory to save checkpoint.
@@ -174,9 +193,10 @@ class CheckpointEngine(metaclass=ABCMeta):
 
         self.checkpoint_dir = checkpoint_dir
         self.storage = storage
+        self.latest_step = 0
         self._save_timeout = save_timeout
         self._local_rank = env_utils.get_local_rank()
-        self._cached_step = 0
+        self._cached_step = -1
         self._replica_count = replica_count
         self._restart_count = env_utils.get_torch_restart_count()
 
@@ -202,8 +222,7 @@ class CheckpointEngine(metaclass=ABCMeta):
         self._shm_lock = SharedLock(name=lock_name, create=False)
 
         # need to wait until the socket server is created(by the saver)
-        while not self._shm_lock.is_available():
-            time.sleep(0.1)
+        wait_socket_server(self._shm_lock)
 
         self._shm_handler = SharedMemoryHandler(
             self.local_shard_id, host=False
@@ -301,6 +320,8 @@ class CheckpointEngine(metaclass=ABCMeta):
             },
         )
 
+        wait_socket_server(queue)
+
         logger.info(
             "Notify agent to create a checkpoint saver using: "
             f"{class_meta.__dict__}."
@@ -320,8 +341,7 @@ class CheckpointEngine(metaclass=ABCMeta):
                     "The event queue cannot be None on local rank 0."
                 )
 
-            while not self._event_queue.is_available():
-                time.sleep(0.1)
+            wait_socket_server(self._event_queue)
 
             logger.info(f"Update saver config: {event.__dict__}")
             self._event_queue.put(event)
@@ -401,6 +421,27 @@ class CheckpointEngine(metaclass=ABCMeta):
                 "from the replica in the memory of the alive node."
             )
         dist.barrier()
+
+    def wait_latest_checkpoint(self, timeout=1800):
+        """
+        Wait for the saver finish persisting the checkpoint of latest step.
+        """
+        start = time.time()
+        while True:
+            tracker_file = os.path.join(
+                self.checkpoint_dir, CheckpointConstant.TRACER_FILE_NAME
+            )
+            with open(tracker_file, "r") as f:
+                step = int(f.read())
+                if step == self.latest_step:
+                    break
+            if time.time() - start > timeout:
+                logger.info(
+                    f"Timeout ({timeout})s to wait for "
+                    "the latest step checkpoint."
+                )
+                break
+            time.sleep(3)
 
     @abstractmethod
     def get_saving_ranks(self):

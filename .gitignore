@@ -1,6 +1,6 @@
 # Proto files
-*_pb2.py
-*_pb2_grpc.py
+dlrover/*_pb2.py
+dlrover/*_pb2_grpc.py
 .pb.go
 
 # System files
@@ -38,7 +38,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 *.ckpt
-dlrover/go/operator/bin/
+go/elasticjob/bin/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

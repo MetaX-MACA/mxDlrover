@@ -16,17 +16,19 @@ from abc import ABCMeta, abstractmethod
 from typing import Dict
 
 from dlrover.python.common.log import default_logger as logger
-from dlrover.python.common.node import Node
+from dlrover.python.diagnosis.common.diagnosis_action import DiagnosisAction
 from dlrover.python.master.hyperparams.simple_strategy_generator import (
     SimpleStrategyGenerator,
 )
 from dlrover.python.master.monitor.error_monitor import ErrorMonitor
 from dlrover.python.master.monitor.speed_monitor import SpeedMonitor
+from dlrover.python.master.node.job_context import get_job_context
 from dlrover.python.master.node.training_node import (
     SyncNodeTrainingPorts,
-    TrainingNodeConfigure,
+    TrainingNodeConfig,
 )
 from dlrover.python.master.resource.job import JobResource
+from dlrover.python.master.watcher.base_watcher import NodeEvent
 from dlrover.python.scheduler.job import JobArgs
 from dlrover.python.scheduler.kubernetes import k8sClient
 
@@ -41,6 +43,7 @@ class JobManager(metaclass=ABCMeta):
         job_args: JobArgs,
         speed_monitor=None,
         error_monitor=None,
+        external_config=None,
     ):
         self._job_resource = JobResource()
         self._job_args = job_args
@@ -52,11 +55,10 @@ class JobManager(metaclass=ABCMeta):
         self._stopped = False
         self._speed_monitor: SpeedMonitor = speed_monitor
         self._error_monitor: ErrorMonitor = error_monitor
-
-        self._job_nodes: Dict[str, Dict[int, Node]] = {}
         self._nodes_required = (0, 0, 0)
 
-        self._training_node_configure = TrainingNodeConfigure()
+        self._training_node_config = TrainingNodeConfig(external_config)
+        self._job_context = get_job_context()
 
     @abstractmethod
     def start(self):
@@ -195,12 +197,19 @@ class JobManager(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def collect_node_heart_beat(self, node_type, node_id, timestamp):
+    def collect_node_heart_beat(
+        self, node_type, node_id, timestamp
+    ) -> DiagnosisAction:
         """Collect the heart beat message of nodes."""
         pass
 
+    def get_job_nodes(self, node_type=""):
+        if node_type == "":
+            return self._job_context.job_nodes()
+        return self._job_context.job_nodes_by_type(node_type)
+
     def sync_node_training_port(self, node_id, port) -> SyncNodeTrainingPorts:
-        return self._training_node_configure.sync_node_training_port(
+        return self._training_node_config.sync_node_training_port(
             node_id, port
         )
 
@@ -226,5 +235,18 @@ class JobManager(metaclass=ABCMeta):
 
     def update_node_required_info_callback(self):
         """Callback when 'update_node_required_info' is invoked."""
+
+        pass
+
+    def get_elastic_run_configs(self) -> Dict[str, str]:
+        return self._training_node_config.get_elastic_run_configs()
+
+    def process_reported_node_event(self, node_event: NodeEvent):
+        """
+        The node events here is reported from training agent.
+
+        Args:
+            node_event: The event from training agent.
+        """
 
         pass

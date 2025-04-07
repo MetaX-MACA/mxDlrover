@@ -17,20 +17,30 @@ from typing import Dict, List
 
 
 class InferenceName:
-    END = "end"
+    NONE = "none"
     TRAINING = "training"
     NODE = "node"
+    WORKER = "worker"
+    ACTION = "action"
+    RESOURCE = "resource"
+    GPU = "gpu"
 
 
 class InferenceAttribute:
     ISORNOT = "is_or_not"
     IS = "is"
     NOT = "not"
+    COLLECT = "collect"
 
 
 class InferenceDescription:
+    NONE = "n/a"
     HANG = "hang"
     FAILURE = "failure"
+    METRICS = "metrics"
+    EVENT = "event"
+    ERROR = "error"
+    RESOURCE = "resource"
 
 
 @dataclass
@@ -62,6 +72,10 @@ class InferenceOperator(metaclass=ABCMeta):
     def is_compatible(self, inference: Inference) -> bool:
         pass
 
+    @property
+    def data_manager(self):
+        return self._data_manager
+
 
 def is_same_inference(inference1: Inference, inference2: Inference) -> bool:
     if (
@@ -88,15 +102,20 @@ def combine_inferences(
 ) -> List[Inference]:
     inferences = []
     for inference2 in inferences2:
-        is_duplicate = False
-        for inference1 in inferences1:
-            if is_same_inference(inference1, inference2):
-                is_duplicate = True
-                break
-        if not is_duplicate:
+        if not is_inference_included(inferences1, inference2):
             inferences.append(inference2)
 
     for inference1 in inferences1:
         inferences.append(inference1)
 
     return inferences
+
+
+def is_training_hanged(inf: Inference):
+    if (
+        inf.name == InferenceName.TRAINING
+        and inf.attribution == InferenceAttribute.IS
+        and inf.description == InferenceDescription.HANG
+    ):
+        return True
+    return False

@@ -173,6 +173,17 @@ class SharedMemoryWriter(StorageWriter):
         self.shm_handler = shm_handler
         self.metadata: Dict[str, Any] = {}
 
+    # Implement the abstract function in StorageWriter
+    def reset(
+        self, checkpoint_id: Union[str, os.PathLike, None] = None
+    ) -> None:
+        pass
+
+    def validate_checkpoint_id(
+        cls, checkpoint_id: Union[str, os.PathLike]
+    ) -> bool:
+        return True
+
     def set_up_storage_writer(self, is_coordinator: bool) -> None:
         pass
 
@@ -297,7 +308,7 @@ class SharedMemoryReader(StorageReader):
         fut.set_result(None)
         return fut
 
-    # Implementating the abstract function in StorageReader
+    # Implement the abstract function in StorageReader
     def read_metadata(self) -> Metadata:
         cached_meta = self.shm_handler.metadata.get()
         dcp_metadata = cached_meta["dcp_metadata"]
@@ -318,6 +329,16 @@ class SharedMemoryReader(StorageReader):
         self, global_plan: List[LoadPlan]
     ) -> List[LoadPlan]:
         return global_plan
+
+    def reset(
+        self, checkpoint_id: Union[str, os.PathLike, None] = None
+    ) -> None:
+        pass
+
+    def validate_checkpoint_id(
+        cls, checkpoint_id: Union[str, os.PathLike]
+    ) -> bool:
+        return True
 
 
 class SlicedBufferedReader(io.BufferedReader):
@@ -393,7 +414,7 @@ class FileReader(StorageReader):
         fut.set_result(None)
         return fut
 
-    # Implementating the abstract function in StorageReader
+    # Implement the abstract function in StorageReader
     def read_metadata(self) -> Metadata:
         with (self.path / ".metadata").open("rb") as metadata_file:
             return pickle.load(metadata_file)
@@ -412,6 +433,16 @@ class FileReader(StorageReader):
         self, global_plan: List[LoadPlan]
     ) -> List[LoadPlan]:
         return global_plan
+
+    def reset(
+        self, checkpoint_id: Union[str, os.PathLike, None] = None
+    ) -> None:
+        pass
+
+    def validate_checkpoint_id(
+        cls, checkpoint_id: Union[str, os.PathLike]
+    ) -> bool:
+        return True
 
 
 class FsdpCheckpointEngine(CheckpointEngine):
@@ -504,20 +535,22 @@ class FsdpCheckpointEngine(CheckpointEngine):
             state_dict (dict): the state dict of model and optimizer to save.
             paths (dict): the storage path to save the state dict.
         """
-        succeed = True
+        success = True
         if step > self._cached_step:
-            succeed = self.save_to_memory(step, state_dict, paths)
+            success = self.save_to_memory(step, state_dict, paths)
 
         if dist.is_initialized():
             dist.barrier()
 
         # Only local rank 0 on each node notifies the event to save.
-        if self._local_rank == 0 and succeed:
+        if self._local_rank == 0 and success:
             logger.info(
                 "Put a save event to notify the agent persists checkpoint."
             )
             event = CheckpointEvent(type=CheckpointEventType.SAVE, step=step)
             self._event_queue.put(event)
+        if success:
+            self.latest_step = step
 
     def get_saver_class(self):
         """

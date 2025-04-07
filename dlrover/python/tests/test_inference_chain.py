@@ -12,25 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import unittest
+from unittest.mock import patch
 
+from dlrover.python.common.constants import ErrorMonitorConstants
 from dlrover.python.diagnosis.common.constants import InferenceConfigKey
 from dlrover.python.diagnosis.common.inference_chain import (
-    Inference,
     InferenceAttribute,
     InferenceDescription,
     InferenceName,
-    is_same_inference,
 )
 from dlrover.python.diagnosis.inferencechain.inference_chain import (
+    Inference,
     InferenceChain,
 )
-from dlrover.python.diagnosis.inferencechain.inferenceoperator.check_failure_node_operator import (  # noqa: E501
-    CheckFailureNodeOperator,
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.observer.resource_collection_operator import (  # noqa: E501
+    ResourceCollectionOperator,
 )
-from dlrover.python.diagnosis.inferencechain.inferenceoperator.check_training_hang_operator import (  # noqa: E501
-    CheckTrainingHangOperator,
+from dlrover.python.diagnosis.inferencechain.inferenceoperator.resolver.resolve_gpu_errors_operator import (  # noqa: E501
+    ResolveGPUErrorsOperator,
 )
 
 
@@ -41,85 +41,39 @@ class InferenceChainTest(unittest.TestCase):
     def tearDown(self):
         pass
 
-    def test_CheckTrainingHangOperator(self):
-        operator = CheckTrainingHangOperator(None)
+    @patch(
+        "dlrover.python.elastic_agent.monitor.resource"
+        ".ResourceMonitor.report_resource"
+    )
+    def test_gpu_resource_error(self, mock_resource_monitor):
+        error_logs = "Test the GPU is lost inference chain"
+        mock_resource_monitor.side_effect = Exception(error_logs)
+        operators = [
+            ResolveGPUErrorsOperator(),
+            ResourceCollectionOperator(),
+        ]
+
         inf = Inference(
-            name=InferenceName.TRAINING,
-            attribution=InferenceAttribute.ISORNOT,
-            description=InferenceDescription.HANG,
-        )
-        self.assertTrue(operator.is_compatible(inf))
-
-        results = operator.infer([inf])
-        self.assertEqual(results[0].name, InferenceName.END)
-
-    def test_CheckFailureNodeOperator(self):
-        file = "data/training.log"
-        path = os.path.dirname(__file__)
-        file_path = os.path.join(path, file)
-
-        operator = CheckFailureNodeOperator()
-        inf = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.ISORNOT,
-            description=InferenceDescription.FAILURE,
-            configs={
-                InferenceConfigKey.LOG_FILE: file_path,
-                InferenceConfigKey.ERRORS: "error code is 507035",
-            },
-        )
-        self.assertTrue(operator.is_compatible(inf))
-
-        results = operator.infer([inf])
-        failure_inf = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.IS,
-            description=InferenceDescription.FAILURE,
-        )
-        self.assertTrue(is_same_inference(results[0], failure_inf))
-
-        #########################################################
-        inf = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.ISORNOT,
-            description=InferenceDescription.FAILURE,
-            configs={
-                InferenceConfigKey.LOG_FILE: file_path,
-                InferenceConfigKey.ERRORS: "error code is 123456",
-            },
+            name=InferenceName.WORKER,
+            attribution=InferenceAttribute.COLLECT,
+            description=InferenceDescription.RESOURCE,
         )
 
-        results = operator.infer([inf])
-        not_failure_inf = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.NOT,
-            description=InferenceDescription.FAILURE,
-        )
-        self.assertTrue(is_same_inference(results[0], not_failure_inf))
-
-    def test_InferenceChain(self):
-        file = "data/training.log"
-        path = os.path.dirname(__file__)
-        file_path = os.path.join(path, file)
-        inf = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.ISORNOT,
-            description=InferenceDescription.FAILURE,
-            configs={
-                InferenceConfigKey.LOG_FILE: file_path,
-                InferenceConfigKey.ERRORS: "error code is 507035",
-            },
-        )
-
-        operators = [CheckFailureNodeOperator()]
         ic = InferenceChain([inf], operators)
         results = ic.infer()
-        failure_inf = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.IS,
-            description=InferenceDescription.FAILURE,
+        self.assertEqual(len(results), 1)
+
+        self.assertEqual(results[0].name, InferenceName.ACTION)
+        self.assertEqual(
+            results[0].configs[InferenceConfigKey.EVENT_TYPE],
+            ErrorMonitorConstants.TYPE_WARN,
         )
-        self.assertTrue(is_same_inference(results[0], failure_inf))
+        self.assertEqual(
+            results[0].configs[InferenceConfigKey.EVENT_ACTION], "GPU is lost"
+        )
+        self.assertEqual(
+            results[0].configs[InferenceConfigKey.EVENT_MSG], error_logs
+        )
 
 
 if __name__ == "__main__":

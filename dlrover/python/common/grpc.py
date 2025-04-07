@@ -180,7 +180,7 @@ class Shard(Message):
 @dataclass
 class Task(Message):
     task_id: int = 0
-    shard: Shard = Shard()
+    shard: Shard = field(default_factory=Shard)
     type: int = 0
     extended_config: Dict[str, str] = field(default_factory=dict)
 
@@ -219,8 +219,8 @@ class OpStats(Message):
 class ModelInfo(Message):
     """ModelInfo contains profiling data of a model."""
 
-    tensor_stats: TensorStats = TensorStats()
-    op_stats: OpStats = OpStats()
+    tensor_stats: TensorStats = field(default_factory=TensorStats)
+    op_stats: OpStats = field(default_factory=OpStats)
     instantiation_memory: int = 0
     activation_memory: int = 0
 
@@ -327,15 +327,12 @@ class NodeAddress(NodeMeta):
 
 
 @dataclass
-class NetworkStatus(NodeMeta):
-    elasped_time: float = 0.0
-
-
-@dataclass
 class NodeEvent(Message):
     event_type: str = ""
-    message: str = ""
-    node: NodeMeta = NodeMeta()
+    event_message: str = ""
+    event_time: float = 0.0
+    event_elapsed_time: float = 0.0
+    node: NodeMeta = field(default_factory=NodeMeta)
 
 
 @dataclass
@@ -479,8 +476,8 @@ class CheckHardwareResetRequest(Message):
 
 @dataclass
 class ParallelConfig(Message):
-    dataloader: DataLoaderConfig = DataLoaderConfig()
-    optimizer: OptimizerConfig = OptimizerConfig()
+    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     restart: bool = False
 
 
@@ -490,21 +487,43 @@ class NodeCheckpointState(Message):
 
 
 @dataclass
-class DiagnosisTrainingLog(Message):
-    timestamp: int = 0
-
-
-@dataclass
-class DiagnosisCudaLog(Message):
-    timestamp: int = 0
-
-
-@dataclass
-class DiagnosisChipMetrics(Message):
-    timestamp: int = 0
+class DiagnosisReportData(Message):
+    data_cls: str = ""
+    data_content: str = ""
+    node_rank: int = -1
 
 
 @dataclass
 class SyncTrainingPort(Message):
     port: int = 0
     newport: int = 0
+
+
+@dataclass
+class ElasticRunConfigRequest(Message):
+    pass
+
+
+@dataclass
+class ElasticRunConfig(Message):
+    configs: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class Event(Message):
+    event_type: str = ""
+    instance: str = ""
+    action: str = ""
+    msg: str = ""
+    labels: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class DiagnosisAction(Message):
+    action_cls: str = ""
+    action_content: str = ""
+
+
+@dataclass
+class HeartbeatResponse(Message):
+    action: DiagnosisAction = field(default_factory=DiagnosisAction)
