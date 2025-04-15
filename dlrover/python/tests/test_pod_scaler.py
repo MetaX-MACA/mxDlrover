@@ -43,7 +43,7 @@ class PodScalerTest(unittest.TestCase):
         mock_k8s_client()
 
     def tearDown(self) -> None:
-        os.environ.clear()
+        del os.environ["POD_IP"]
 
     def test_init_pod_template(self):
         error_monitor = SimpleErrorMonitor()

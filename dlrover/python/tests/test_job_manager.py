@@ -396,7 +396,7 @@ class DistributedJobManagerTest(unittest.TestCase):
                 node.create_time = now - timedelta(seconds=1400)
                 node.start_time = now - timedelta(seconds=1200)
             self.job_context.update_job_node(node)
-        events = manager._get_dead_node_event()
+        events = manager._get_dead_node_event(600)
         self.assertEqual(len(events), 2)
 
         nodes_time_info = manager._get_nodes_time_info()
@@ -417,7 +417,7 @@ class DistributedJobManagerTest(unittest.TestCase):
                 node.create_time = now - timedelta(seconds=1400)
                 node.start_time = now - timedelta(seconds=1200)
             self.job_context.update_job_node(node)
-        events = manager._get_dead_node_event()
+        events = manager._get_dead_node_event(600)
         self.assertEqual(len(events), 1)
 
         job_nodes = self.job_context.job_nodes()
@@ -429,7 +429,7 @@ class DistributedJobManagerTest(unittest.TestCase):
             node.create_time = now - timedelta(seconds=800)
             node.start_time = now - timedelta(seconds=600)
             self.job_context.update_job_node(node)
-        events = manager._get_dead_node_event()
+        events = manager._get_dead_node_event(600)
         self.assertEqual(len(events), 0)
 
         job_nodes = self.job_context.job_nodes()
@@ -444,7 +444,7 @@ class DistributedJobManagerTest(unittest.TestCase):
             node.create_time = now - timedelta(seconds=1400)
             node.start_time = now - timedelta(seconds=1200)
             self.job_context.update_job_node(node)
-        events = manager._get_dead_node_event()
+        events = manager._get_dead_node_event(600)
         self.assertEqual(len(events), 2)
 
     def test_relaunch_training_master(self):

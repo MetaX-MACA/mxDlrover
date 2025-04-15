@@ -1120,6 +1120,7 @@ class TempDirCheckpointSaver(AsyncCheckpointSaver):
         local_shard_num=1,
         global_shard_num=1,
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+        replica_count=0,
     ) -> None:
         super().__init__(
             checkpoint_dir,
@@ -1127,6 +1128,7 @@ class TempDirCheckpointSaver(AsyncCheckpointSaver):
             local_shard_num,
             global_shard_num,
             save_timeout,
+            replica_count
         )
 
         if self._node_rank == 0:

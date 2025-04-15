@@ -501,7 +501,7 @@ class DistributedJobManager(JobManager):
             )
             time.sleep(15)
 
-    def _get_dead_node_event(self, window_interval=3000) -> List[NodeEvent]:
+    def _get_dead_node_event(self, window_interval=600) -> List[NodeEvent]:
         now = time.time()
         dead_events: List[NodeEvent] = []
         job_nodes = self.get_job_nodes()
@@ -965,8 +965,9 @@ class DistributedJobManager(JobManager):
         node_group: List[Node] = []
 
         groups = self._topo_manager.get_groups(node.id)
+        nodes = self.get_job_nodes(node.type)
         for id in groups:
-            node_group.append(self._job_nodes[node.type][id])
+            node_group.append(nodes[id])
         return node_group
 
     def _relaunch_group_node(self, fault_node: Node):

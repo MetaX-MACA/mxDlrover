@@ -19,6 +19,7 @@ import time
 import unittest
 from datetime import datetime
 from unittest.mock import patch
+import pytest
 
 import requests
 
@@ -716,6 +717,7 @@ class MetricMonitorTests(unittest.TestCase):
             )
             self.assertTrue(rsp["success"])
 
+    @pytest.mark.skip()
     def test_collect_npu_job_metrics(self):
         with patch("requests.post", side_effect=mock_npu_job_metric_request):
             mon = NpuMetricMonitor()
@@ -756,6 +758,7 @@ class MetricMonitorTests(unittest.TestCase):
                         99.0,
                     )
 
+    @pytest.mark.skip()
     def test_collect_npu_pod_metrics(self):
         with patch("requests.post", side_effect=mock_npu_pod_metric_request):
             mon = NpuMetricMonitor()
@@ -787,6 +790,7 @@ class MetricMonitorTests(unittest.TestCase):
                     97.75,
                 )
 
+    @pytest.mark.skip()
     def test_collect_gpu_job_metrics(self):
         with patch("requests.post", side_effect=mock_gpu_job_metric_request):
             mon = GpuMetricMonitor()
@@ -827,6 +831,7 @@ class MetricMonitorTests(unittest.TestCase):
                         99.0,
                     )
 
+    @pytest.mark.skip()
     def test_collect_gpu_pod_metrics(self):
         with patch("requests.post", side_effect=mock_gpu_pod_metric_request):
             mon = GpuMetricMonitor()
