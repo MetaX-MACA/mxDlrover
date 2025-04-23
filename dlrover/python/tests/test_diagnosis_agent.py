@@ -49,6 +49,7 @@ from dlrover.python.tests.test_utils import start_local_master
 
 class TestDiagnosisAgent(unittest.TestCase):
     def setUp(self):
+        self.env_back = os.environ.copy()
         self._master, self.addr = start_local_master()
         MasterClient._instance = build_master_client(self.addr, 1)
         launch_config = LaunchConfig(
@@ -60,8 +61,10 @@ class TestDiagnosisAgent(unittest.TestCase):
         )
         self.config = ElasticLaunchConfig(**launch_config.__dict__)
 
+
     def tearDown(self):
         os.environ.clear()
+        os.environ.update(self.env_back)
         self._master.stop()
 
     def test_diagnose_agent(self):

@@ -42,7 +42,7 @@ if __name__ == "__main__":
         os.environ["MASTER_PORT"] = "29500"
         subprocess.Popen(
             [
-                "/usr/local/bin/python",
+                "python",
                 "dlrover/python/tests/orphan_process.py",
             ],
             env=os.environ,

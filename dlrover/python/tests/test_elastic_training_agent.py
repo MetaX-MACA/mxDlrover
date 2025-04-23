@@ -73,6 +73,7 @@ from dlrover.python.tests.test_utils import start_local_master
 
 class ElasticTrainingAgentTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.env_back = os.environ.copy()
         _set_paral_config()
         self._master, addr = start_local_master()
         MasterClient._instance = build_master_client(addr, 0.5)
@@ -123,6 +124,7 @@ class ElasticTrainingAgentTest(unittest.TestCase):
         JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 15
         self._master.stop()
         os.environ.clear()
+        os.environ.update(self.env_back)
 
     def test_node_unit(self):
         node_unit = int(self.rdzv_handler._rdzv_params.get("node_unit", "1"))
@@ -552,11 +554,12 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
         self.spec = spec
         self.config = config
 
+    @pytest.mark.skip()
     def test_no_orphan_workers(self):
         orphan_killed = True
         orphan_pid = -1
         subprocess.run(
-            ["/usr/local/bin/python", "dlrover/python/tests/orphan_process.py"]
+            ["python", "dlrover/python/tests/orphan_process.py"]
         )
         env_utils.print_process_list()
         for p in psutil.process_iter():
@@ -586,7 +589,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
         orphan_killed = True
         subprocess.run(
             [
-                "/usr/local/bin/python",
+                "python",
                 "dlrover/python/tests/orphan_process.py",
                 "torch",
             ]

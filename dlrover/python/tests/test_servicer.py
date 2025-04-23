@@ -54,6 +54,7 @@ ray_event_queue = RayEventQueue.singleton_instance()
 
 class MasterServicerTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.env_back = os.environ.copy()
         mock_k8s_client()
         params = MockK8sPSJobArgs()
         params.initilize()
@@ -95,6 +96,7 @@ class MasterServicerTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         os.environ.clear()
+        os.environ.update(self.env_back)
         self.job_context.clear_job_nodes()
 
     def test_query_running_nodes(self):
