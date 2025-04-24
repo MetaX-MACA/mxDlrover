@@ -24,6 +24,7 @@ import time
 import unittest
 from unittest import mock
 from unittest.mock import patch
+import pytest
 
 import psutil
 from torch.distributed.elastic.agent.server.api import WorkerSpec, WorkerState

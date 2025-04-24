@@ -36,7 +36,7 @@ class RayJobArgsTest(unittest.TestCase):
             path = os.path.join(tmpdirname, "test.json")
             with open("test.json", "w") as f:
                 json.dump(data, f)
-        ut_cases_path = os.path.join(os.environ.get('WORKSPACE', ''), 'testcases/dlrover/python')
+        ut_cases_path = os.path.join(os.environ.get('WORKSPACE', ''), 'map/testcases/dlrover/python')
         params = RayJobArgs(PlatformType.RAY, "default", "test", ut_cases_path)
         self.assertEqual(params.job_name, "test")
         self.assertEqual(params.namespace, "default")
