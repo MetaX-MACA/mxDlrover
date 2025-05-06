@@ -84,6 +84,7 @@ def libunwind_workspace():
            "--disable-shared",
        ],
        #sha256 = "4a6aec666991fb45d0889c44aede8ad6eb108071c3554fcdff671f9c94794976",  # 2024-02-22
+       sha256 = "ddf0e32dd5fafe5283198d37e4bf9decf7ba1770b6e7e006c33e6df79e6a6157",
        strip_prefix = "libunwind-1.8.1",
        urls = ["https://github.com/libunwind/libunwind/releases/download/v1.8.1/libunwind-1.8.1.tar.gz"],
     )

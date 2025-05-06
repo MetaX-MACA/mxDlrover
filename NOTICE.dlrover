@@ -80,4 +80,9 @@ The following files may have been modified by MetaX Integrated Circuits (Shangha
 - dlrover/trainer/torch/node_check/nvidia_gpu.py
 - dlrover/trainer/torch/node_check/utils.py
 - examples/pytorch/mnist/cnn_train.py
+- xpu_timer/xpu_timer/common/manager.h
+- xpu_timer/xpu_timer/common/manager.cc
+- xpu_timer/xpu_timer/common/platform.h
+- xpu_timer/xpu_timer/common/platform.cc
+- xpu_timer/xpu_timer/common/util.cc
 - setup.py

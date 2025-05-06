@@ -1,3 +1,4 @@
+// 2025-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 // Copyright 2024 The DLRover Authors. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,7 +33,12 @@
 #include "xpu_timer/common/stack_util.h"
 #include "xpu_timer/common/util.h"
 #include "xpu_timer/common/xpu_timer.h"
+#if defined XPU_NVIDIA
 #include "xpu_timer/nvidia/nvidia_dtype_util.h"
+#endif
+#if defined XPU_MACA
+#include "xpu_timer/maca/maca_dtype_util.h"
+#endif
 #include "xpu_timer/protos/hook.pb.h"
 #include "xpu_timer/python/py_tracing_data.h"
 #include "xpu_timer/python/py_tracing_loader.h"
