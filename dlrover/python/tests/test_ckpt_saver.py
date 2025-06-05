@@ -271,7 +271,7 @@ class CheckpointSaverTest(unittest.TestCase):
             handler(None, None)
             with self.assertRaises(KeyboardInterrupt):
                 handler = signal.getsignal(signal.SIGINT)
-                handler(None, None)
+                handler(signal.SIGINT, None)
             ckpt_files = os.listdir(tmpdir)
             self.assertEqual(len(ckpt_files), 3)
             saver.close()

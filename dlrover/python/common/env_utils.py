@@ -94,7 +94,7 @@ def print_process_list():
 
 def get_proc_env(pid):
     try:
-        with open(f"/proc/{pid}/environ", "rb+") as f:
+        with open(f"/proc/{pid}/environ", "rb") as f:
             data = f.read()
             envs = [chunk.decode("utf-8") for chunk in data.split(b"\x00")]
             return {
