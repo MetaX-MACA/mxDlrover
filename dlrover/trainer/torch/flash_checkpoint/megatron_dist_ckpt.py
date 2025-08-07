@@ -29,7 +29,6 @@ try:
     from megatron.core.num_microbatches_calculator import (
         update_num_microbatches,
     )
-    from megatron.core.optimizer.optimizer import ChainedOptimizer
     from megatron.training import get_args
     from megatron.training.checkpointing import (
         check_checkpoint_args,
@@ -255,12 +254,20 @@ def save_checkpoint(
             dist_opter_state = get_chained_optimizer_parameter_state(optimizer)
         else:
             dist_opter_state = get_parameter_state(optimizer)
+    try:
+        # 新版本接口
+        from megatron.core import parallel_state
+        get_expert_data_parallel_rank = parallel_state.get_expert_data_parallel_rank
+    except ImportError:
+        # 老版本 fallback
+        from megatron.core import mpu
+        get_expert_data_parallel_rank = mpu.get_data_modulo_expert_parallel_rank
 
     write_model = False
     # Collect args, model, RNG.
     if (
         not torch.distributed.is_initialized()
-        or mpu.get_data_modulo_expert_parallel_rank() == 0
+        or get_expert_data_parallel_rank() == 0
     ):
         write_model = True
     
