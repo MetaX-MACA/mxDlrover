@@ -102,3 +102,6 @@ def load_checkpoint(
         running_states["step"],
         running_states["sample_start_index"],
     )
+
+# Copyright (c) 2025 MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+

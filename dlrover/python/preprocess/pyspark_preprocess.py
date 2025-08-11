@@ -214,3 +214,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Copyright (c) 2025 MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+

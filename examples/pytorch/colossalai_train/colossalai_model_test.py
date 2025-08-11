@@ -1,3 +1,5 @@
+# Copyright (c) 2025 MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
 import argparse
 import functools
 import random

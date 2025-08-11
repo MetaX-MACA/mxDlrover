@@ -1,0 +1,67 @@
+This project is modified from dlrover (https://github.com/intelligent-machine-learning/dlrover).
+Please see the LICENSE for the license for this project.
+
+This project contains third-party components with separate copyright notices and license terms. Your use of the source code for these third-party components are subject to the terms and conditions of their licenses.
+
+The following files may have been modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. in 2025. Modification copyright 2025 MetaX Integrated Circuits (Shanghai) Co.,Ltd.
+- dlrover/python/common/constants.py
+- dlrover/python/common/env_utils.py
+- dlrover/python/common/global_context.py
+- dlrover/python/common/grpc.py
+- dlrover/python/common/multi_process.py
+- dlrover/python/common/storage.py
+- dlrover/python/elastic_agent/context.py
+- dlrover/python/elastic_agent/master_client.py
+- dlrover/python/elastic_agent/torch/ckpt_saver.py
+- dlrover/python/elastic_agent/torch/training.py
+- dlrover/python/master/dist_master.py
+- dlrover/python/master/elastic_training/net_topology.py
+- dlrover/python/master/elastic_training/rdzv_manager.py
+- dlrover/python/master/local_master.py
+- dlrover/python/master/master.py
+- dlrover/python/master/monitor/error_monitor.py
+- dlrover/python/master/monitor/speed_monitor.py
+- dlrover/python/master/node/dist_job_manager.py
+- dlrover/python/master/node/job_manager.py
+- dlrover/python/master/node/training_node.py
+- dlrover/python/master/node/worker.py
+- dlrover/python/master/resource/job.py
+- dlrover/python/master/scaler/pod_scaler.py
+- dlrover/python/master/servicer.py
+- dlrover/python/master/watcher/k8s_watcher.py
+- dlrover/python/scheduler/job.py
+- dlrover/python/scheduler/kubernetes.py
+- dlrover/python/scheduler/ray.py
+- dlrover/trainer/torch/elastic_run.py
+- dlrover/trainer/torch/flash_checkpoint/engine.py
+- dlrover/trainer/torch/flash_checkpoint/fsdp.py
+- dlrover/trainer/torch/flash_checkpoint/fsdp_engine.py
+- dlrover/trainer/torch/flash_checkpoint/megatron.py
+- dlrover/trainer/torch/flash_checkpoint/megatron_dist_ckpt.py
+- dlrover/trainer/torch/flash_checkpoint/megatron_engine.py
+- dlrover/trainer/torch/flash_checkpoint/replica.py
+- dlrover/trainer/torch/node_check/ascend_npu.py
+- dlrover/trainer/torch/node_check/nvidia_gpu.py
+- dlrover/trainer/torch/node_check/utils.py
+- examples/pytorch/mnist/cnn_train.py
+- xpu_timer/config_subparsers/__init__.py
+- xpu_timer/xpu_timer/common/manager.h
+- xpu_timer/xpu_timer/common/platform.h
+
+The following files are newly added by MetaX Integrated Circuits (Shanghai) Co., Ltd. in 2025. All Rights Reserved. 
+- dlrover/python/master/dragonfly/__init__.py
+- dlrover/python/master/dragonfly/dragonfly_topo_v2.py
+- dlrover/python/preprocess/pyspark_preprocess.py
+- dlrover/trainer/torch/flash_checkpoint/colossalai_engine.py
+- dlrover/trainer/torch/flash_checkpoint/colossalai_hybrid.py
+- dlrover/trainer/torch/node_check/switch_box.py
+- examples/pytorch/colossalai_train/ckpt_io.py
+- examples/pytorch/colossalai_train/colossalai_model_test.py
+- examples/pytorch/colossalai_train/data_utils.py
+- examples/pytorch/colossalai_train/k8s_test_32c.sh
+- examples/pytorch/colossalai_train/model_utils.py
+- xpu_timer/config_subparsers/maca.py
+- xpu_timer/xpu_timer/maca/gen_nvidia_symbols.py
+- xpu_timer/xpu_timer/maca/hook.h
+- xpu_timer/xpu_timer/maca/maca_dtype_util.h
+- xpu_timer/xpu_timer/maca/maca_timer.h

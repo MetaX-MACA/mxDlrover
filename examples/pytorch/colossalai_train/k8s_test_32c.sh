@@ -1,3 +1,5 @@
+# Copyright (c) 2025 MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
 export MCCL_NET_GDR_LEVEL=7
 export MCCL_MAX_NCHANNELS=16
 export MCCL_P2P_LEVEL=SYS
