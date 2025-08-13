@@ -142,7 +142,7 @@ class Worker(WorkerHelper, BaseRLWorkload):
         )
         return cuda_visible_devices
 
-    @trainer_invocation(dispatch_mode=Dispatch.DP_COMPUTE_PROTO_WITH_FUNC)
+    @trainer_invocation()
     def execute_with_func_generator(self, func, *args, **kwargs):
         ret_proto = func(self, *args, **kwargs)
         return ret_proto

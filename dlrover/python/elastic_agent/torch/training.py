@@ -1746,7 +1746,7 @@ class NodeCheckAgent(object):
         if len(dmesg_error) != 0:
             logger.warn(f"Find dmesg error in last 200 line!\n {dmesg_error}")
             self._client.report_failures(
-                NodeErrorMessage.NETWORKER_ERROR,
+                NodeEventType.NODE_CHECK_FAILED,
                 level=TrainingExceptionLevel.NODE_ERROR,
             )
             raise RuntimeError("The node has card error.")
@@ -1758,7 +1758,7 @@ class NodeCheckAgent(object):
             success = _switchbox_check(config)
             if not success:
                 self._client.report_failures(
-                    NodeErrorMessage.NETWORKER_ERROR,
+                    NodeEventType.NODE_CHECK_FAILED,
                     level=TrainingExceptionLevel.NODE_ERROR,
                 )
                 raise RuntimeError("The node has switch box error.")

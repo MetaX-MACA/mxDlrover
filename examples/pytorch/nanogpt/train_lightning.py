@@ -295,7 +295,6 @@ def setup(args):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     print(f"rank {rank} is initialized local_rank = {local_rank}")
     # This process will do logging, checkpointing etc.
-    rank == 0
     seed_offset = rank  # Each process gets a different seed
     torch.manual_seed(1337 + seed_offset)
     torch.backends.cuda.matmul.allow_tf32 = True  # Allow tf32 on matmul

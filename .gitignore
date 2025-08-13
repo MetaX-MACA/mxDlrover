@@ -101,3 +101,14 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# xpu timer compile generated file
+xpu_timer/.bazelrc
+xpu_timer/.build_platform
+xpu_timer/.platform_version
+xpu_timer/WORKSPACE
+xpu_timer/bazel-bin
+xpu_timer/bazel-out
+xpu_timer/bazel-testlogs
+xpu_timer/bazel-xpu_timer
+xpu_timer/xpu_config/xpu_config.bzl

@@ -162,10 +162,7 @@ class JobMetricCollector(BaseMetricCollector):
         for node in running_nodes:
             node_sample = copy.deepcopy(node)
             node_sample.used_resource.memory *= MemoryUnit.MB
-            if (node.type, node.id) in perf_monitor.running_workers:
-                self._runtime_metric.running_nodes.append(node_sample)
-            else:
-                self._runtime_metric.running_nodes.append(node_sample)
+            self._runtime_metric.running_nodes.append(node_sample)
         if not self._report_runtime_thread.is_alive():
             self._report_runtime_thread.start()
 

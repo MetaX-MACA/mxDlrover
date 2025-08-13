@@ -418,7 +418,6 @@ class MasterServicerFunctionalTest(unittest.TestCase):
         message = comm.TaskResult("test", 0, "")
         request.data = message.serialize()
         self.servicer._start_autoscale = False
-        self.servicer._perf_monitor.completed_global_step == 0
         self.servicer._start_training_time = time.time() - 3600
         response = self.servicer.report(request, None)
         self.assertTrue(self.servicer._start_autoscale)

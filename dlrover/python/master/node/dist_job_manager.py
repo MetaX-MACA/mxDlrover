@@ -33,6 +33,7 @@ from dlrover.python.common.constants import (
     NodeResourceLimit,
     NodeStatus,
     NodeType,
+    PlatformType,
     TrainingExceptionLevel,
 )
 from dlrover.python.common.global_context import Context
@@ -195,8 +196,11 @@ class DistributedJobManager(JobManager):
         )
         self._scaler: Scaler = job_scaler
         self._init_training_node_manager()
-        self._topo_manager = DragonflyV2TopoManager.singleton_instance(job_args.namespace, job_args.job_name)
-        self._enable_dragonfly = self._topo_manager.dragonfly_enable()
+        if job_args.platform in (PlatformType.KUBERNETES, PlatformType.PY_KUBERNETES):
+            self._topo_manager = DragonflyV2TopoManager.singleton_instance(job_args.namespace, job_args.job_name)
+            self._enable_dragonfly = self._topo_manager.dragonfly_enable()
+        else:
+            self._enable_dragonfly = False
 
     def start(self):
         self._scaler.start()
@@ -233,12 +237,6 @@ class DistributedJobManager(JobManager):
             name="node_heartbeat_monitor",
             daemon=True,
         ).start()
-        if os.getenv("KUBERNETES_SERVICE_HOST"):
-            threading.Thread(
-                target=self._monitor_scale_plan_crd,
-                name="scaleplan_monitor",
-                daemon=True,
-            ).start()
 
     def _has_running_workers(self):
         nodes = self._node_watcher.list()
@@ -574,29 +572,6 @@ class DistributedJobManager(JobManager):
                 result[node.id] = result_dict
 
         return result
-
-    def _monitor_scale_plan_crd(self):
-        """Monitor the Scaler CRD from users to adjust the job resource"""
-        logger.info("Start to monitor Scaler CRD")
-        while True:
-            try:
-                if self._stopped:
-                    logger.info("Stop monitoring Scaler CRDs.")
-                    break
-                for plan in self._scaler_watcher.watch():
-                    try:
-                        self._job_autoscaler.execute_job_optimization_plan(
-                            plan
-                        )
-                    except Exception as e:
-                        logger.warning(e)
-                        detail_trace_back = traceback.format_exc()
-                        logger.warning(detail_trace_back)
-            except Exception as e:
-                logger.warning(e)
-                detail_trace_back = traceback.format_exc()
-                logger.warning(detail_trace_back)
-                time.sleep(5)
 
     def _process_list_nodes(self, nodes: List[Node]):
         """Callback with node list by the list api of k8s."""
