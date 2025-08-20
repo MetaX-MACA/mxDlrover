@@ -1,3 +1,4 @@
+// 2025-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 // Copyright 2024 The DLRover Authors. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,7 +65,7 @@ void ShmSwitch::reset(const std::string& path, const std::string& oss_args,
 InterProcessBarrierImpl::InterProcessBarrierImpl(std::string name,
                                                  int world_size, int rank)
     : name_(name) {
-  bip::managed_shared_memory managed_shm(bip::open_or_create, name.c_str(),
+    bip::managed_shared_memory managed_shm(bip::open_or_create, name.c_str(),
                                          4096);  // one page is enough
   LOG(INFO) << "Barrier name in shm is " << name;
   LOG(INFO) << "World size " << world_size;
@@ -279,6 +280,7 @@ void setUpDlopenLibrary() {
   std::string line;
   while (std::getline(maps_file, line)) {
     size_t pos = line.find('/');
+    #ifdef XPU_NVIDIA
     if (pos != std::string::npos) {
       std::string path = line.substr(pos);
       if (!nccl_found && path.find("libnccl.so") != std::string::npos) {
@@ -301,6 +303,31 @@ void setUpDlopenLibrary() {
         break;
       }
     }
+    #endif
+    #ifdef XPU_MACA
+    if (pos != std::string::npos) {
+      std::string path = line.substr(pos);
+      if (!nccl_found && path.find("libmccl.so") != std::string::npos) {
+        GlobalConfig::dlopen_path["NCCL"] = path;
+        nccl_found = true;
+      } else if (!torch_cuda &&
+                 path.find("libtorch_cuda.so") != std::string::npos) {
+        GlobalConfig::dlopen_path["TORCH_CUDA"] = path;
+        torch_cuda = true;
+      } else if (!cublas_lt_found &&
+                 path.find("libmcblasLt.so") != std::string::npos) {
+        GlobalConfig::dlopen_path["CUBLASLT"] = path;
+        cublas_lt_found = true;
+      } else if (!cublas_found &&
+                 path.find("libmcblas.so") != std::string::npos) {
+        GlobalConfig::dlopen_path["CUBLAS"] = path;
+        cublas_found = true;
+      }
+      if (nccl_found && cublas_lt_found && cublas_found && torch_cuda) {
+        break;
+      }
+    }
+    #endif
   }
 
   // maybe static link
@@ -356,7 +383,7 @@ void setUpGlobalConfig() {
       EnvVarRegistry::GetEnvVar<bool>("XPU_TIMER_DEBUG_MODE");
 #ifdef XPU_NVIDIA
   std::string dev_path = "/dev/nvidia";
-#endif
+
   for (uint64_t device_index = 0; device_index < 16; device_index++) {
     std::filesystem::path dev(dev_path + std::to_string(device_index));
     if (std::filesystem::exists(dev)) {
@@ -381,6 +408,12 @@ void setUpGlobalConfig() {
     GlobalConfig::enable = true;
     LOG(INFO) << "[ENV] Debug mode is on, ignore all check";
   }
+#endif
+
+#ifdef XPU_MACA
+  GlobalConfig::enable = true;
+#endif
+
   setUpDlopenLibrary();
 }
 

@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2022 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -98,7 +99,7 @@ class JobArgs(JsonSerializable):
         self.resource_limits = ResourceLimits()
         self.relaunch_always = True
         self.remove_exited_node = False
-        self.cordon_fault_node = False
+        self.cordon_fault_node = True
 
     @abstractmethod
     def initilize(self):

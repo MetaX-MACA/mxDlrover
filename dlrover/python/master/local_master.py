@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2022 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,10 +41,11 @@ class LocalJobMaster(JobMaster):
         self.speed_monitor = SpeedMonitor()
         self.task_manager = TaskManager(0, self.speed_monitor)
         self.job_manager = create_job_manager(args, self.speed_monitor)
-        elastic_training = RendezvousName.ELASTIC_TRAINING
+        elasticTraining = RendezvousName.ELASTIC_TRAINING
+        networkCheck = RendezvousName.NETWORK_CHECK
         self.rdzv_managers: Dict[str, RendezvousManager] = {
-            elastic_training: ElasticTrainingRendezvousManager(),
-            RendezvousName.NETWORK_CHECK: NetworkCheckRendezvousManager(),
+            elasticTraining: ElasticTrainingRendezvousManager(),
+            networkCheck: NetworkCheckRendezvousManager(),
         }
         self.job_metric_collector = self._create_metric_collector_if_needed(
             args

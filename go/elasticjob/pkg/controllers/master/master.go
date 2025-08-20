@@ -1,3 +1,4 @@
+// 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 // Copyright 2022 The DLRover Authors. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,7 +37,7 @@ const (
 	masterCommand              = "python -m dlrover.python.master.main"
 	masterServicePort          = 50001
 	initMasterIndex            = 0
-	defaultImagePullPolicy     = "Always"
+	defaultImagePullPolicy     = "IfNotPresent"
 	envMasterAddrKey           = "DLROVER_MASTER_ADDR"
 	envBrainServiceAddrKey     = "DLROVER_BRAIN_SERVICE_ADDR"
 	defaultBrainServiceAddr    = "dlrover-brain.dlrover.svc.cluster.local:50001"

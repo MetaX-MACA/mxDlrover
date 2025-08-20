@@ -70,6 +70,7 @@ class ElasticRunTest(unittest.TestCase):
 
     def test_elastic_config_from_args(self):
         args = [
+            "--switchbox_check",
             "--precheck",
             "1",
             "--auto_tunning",
@@ -92,9 +93,12 @@ class ElasticRunTest(unittest.TestCase):
         self.assertEqual(config.node_unit, 4)
         self.assertEqual(config.rdzv_configs["node_unit"], 4)
         self.assertEqual(config.training_port, 1000)
-        self.assertEqual(cmd, "/usr/local/bin/python")
+        import sys
+        self.assertEqual(cmd, sys.executable)
         self.assertListEqual(cmd_args, ["-u", "test.py", "--batch_size", "16"])
 
+        self.assertTrue(config.switchbox_check)
+        self.assertEqual(config.box_pairs, [(0,1), (2, 4), (3, 5), (6, 7)])
     @patch(f"{MC_PATH}.get_elastic_run_config")
     def test_elastic_config_from_master_1(self, mock_func):
         mock_func.return_value = {

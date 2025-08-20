@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import subprocess
 from typing import (
     Any,
     Callable,
@@ -184,6 +186,10 @@ class ElasticLaunchConfig(LaunchConfig):
     tee: Union[Std, Dict[int, Std]] = Std.NONE
     training_log_file: str = ""
     failure_node_errors: str = ""
+    switchbox_check: bool = False
+    box_pairs: Union[Std, List[Tuple[int, int]]] =  Std.NONE
+    min_bandwidth: int = 10000
+    min_channels: int = 2
     numa_affinity: bool = False
 
     def set_node_unit(self, node_unit):
@@ -587,6 +593,11 @@ class ElasticTrainingAgent(LocalElasticAgent):
             worker_group.master_addr = master_addr
             worker_group.master_port = master_port
 
+        # compatible with torch 2.4
+        if not version_less_than_240():
+            worker_group.master_addr = master_addr
+            worker_group.master_port = master_port
+
         logger.info(
             f"[{spec.role}] Rendezvous complete for workers. Result:\n"
             f"  restart_count={self._restart_count}\n"
@@ -856,6 +867,7 @@ class ElasticTrainingAgent(LocalElasticAgent):
         while True:
             try:
                 if self._config.network_check:
+                    run_node_check(self._config, self._entrypoint)
                     run_network_check(self._config, self._entrypoint)
                 super()._initialize_workers(worker_group)
                 # We need to register handler after starting workers because
@@ -1524,6 +1536,67 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
         shutil.rmtree(result_dir, ignore_errors=True)
         return elapsed_time
 
+class NodeCheckAgent(object):
+    """
+    This agent will run to check cards available.
+    """
+
+    def __init__(self):
+        self._client = MasterClient.singleton_instance()
+
+    def _collect_dmesg(self) -> List[str]:
+        # ����dmesg����������
+        dmesg_output = subprocess.run(["dmesg | tail -n 200"], capture_output=True, shell=True, text=True)
+
+        # ��������зָ���б�
+        dmesg_lines  =  dmesg_output.stdout.split('\n')
+        recent_dmesg :List[str] = []
+        for line in dmesg_lines:
+            # ���ÿ��dmesg��Ϣ
+            if "RAS.ALERT Please contact administrator to reset card" in line or \
+                "shader int:deal with the shader exception, err_type:0x1" in line:
+                recent_dmesg.append(line)
+        return recent_dmesg
+
+    def run(self, config) -> bool:
+        logger.info("NodeCheckAgent run start")
+        success = True
+        dmesg_error = self._collect_dmesg()
+        if len(dmesg_error) != 0:
+            logger.warn(f"Find dmesg error in last 200 line!\n {dmesg_error}")
+            self._client.report_failures(
+                NodeErrorMessage.NETWORKER_ERROR,
+                level=TrainingExceptionLevel.NODE_ERROR,
+            )
+            raise RuntimeError("The node has card error.")
+        logger.info(
+            f"NodeCheckAgent run end {success}"
+        )
+
+        if config.switchbox_check:
+            success = _switchbox_check(config)
+            if not success:
+                self._client.report_failures(
+                    NodeErrorMessage.NETWORKER_ERROR,
+                    level=TrainingExceptionLevel.NODE_ERROR,
+                )
+                raise RuntimeError("The node has switch box error.")
+
+        return success
+
+def _switchbox_check(config: ElasticLaunchConfig,) -> bool:
+    box_pairs_format = [f"{t[0]}:{t[1]}" for t in config.box_pairs]
+    cmd_args = ["python3", "-m", "dlrover.trainer.torch.node_check.switch_box", "--pairs"]
+    cmd_args += box_pairs_format
+    cmd_args += ["--min-channels", f"{config.min_channels}", "--min-bandwidth", f"{config.min_bandwidth}"]
+    result = subprocess.run(
+        cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    if 0 != result.returncode:
+        logger.error(f"switchbox_check failed. output {result.stdout} error {result.stderr} ")
+        return False
+    logger.info(f"switchbox_check successed. output {result.stdout}")
+    return True
 
 def _create_check_agent(
     config: ElasticLaunchConfig,
@@ -1629,6 +1702,13 @@ def run_network_check(config: ElasticLaunchConfig, entrypoint):
     else:
         logger.warning(f"Unsupported accelerator chip {config.accelerator}.")
         return True
+    if config.switchbox_check:
+        env_conf = os.getenv("NCCL_SETTINGS", "")
+        if env_conf != "":
+            env_conf +=  ","
+        env_conf += "MCCL_DISABLE_OPTIC_LINK=1"
+        os.environ['NCCL_SETTINGS'] = env_conf
+
     for _ in range(2):
         # If network fails because other abnormal node, We
         # will retry to check network after the new node is starting.
@@ -1645,4 +1725,18 @@ def run_network_check(config: ElasticLaunchConfig, entrypoint):
             )
     if success and config.comm_perf_test:
         comm_perf_check(config=config, entrypoint=entrypoint, args=cmd_args)
+    return success
+
+def run_node_check(config: ElasticLaunchConfig, entrypoint):
+    if not config.accelerator == Accelerators.NVIDIA_GPU:
+        logger.warning(f"Node_check unsupported accelerator chip {config.accelerator}.")
+        return True
+
+    agent = NodeCheckAgent()
+    success = agent.run(config)
+    if success:
+        logger.info("Node check passed.")
+        return success
+    else:
+        logger.error("Node check fail.")
     return success

@@ -1,3 +1,5 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -172,6 +174,7 @@ class MegatronDistCheckpointEngine(CheckpointEngine):
         storage,
         comm_backend="",
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+        replica_count=0,
     ):
         if dist.is_initialized():
             try:
@@ -192,7 +195,7 @@ class MegatronDistCheckpointEngine(CheckpointEngine):
             self._pp_world_size = 1
             self._tp_world_size = 1
 
-        super().__init__(checkpoint_dir, storage, comm_backend, save_timeout)
+        super().__init__(checkpoint_dir, storage, comm_backend, save_timeout, replica_count=replica_count)
 
     def get_saving_ranks(self):
         """
@@ -203,7 +206,7 @@ class MegatronDistCheckpointEngine(CheckpointEngine):
         return None
 
     @timer
-    def save_to_memory(self, step, state_dict, paths):
+    def save_to_memory(self, step, state_dict, paths, write_model=True):
         """
         Synchronously Saves the state dict into the shared memory with the main
         process. If the agent in the main process is saving the shared memory
@@ -219,10 +222,11 @@ class MegatronDistCheckpointEngine(CheckpointEngine):
                 the value is the path of storage to save.
         """
         conf = CheckpointConfig(step=step, paths=paths)
+        conf.write_model = write_model
         return self.save_state_dict_to_memory(state_dict, conf)
 
     @timer
-    def save_to_storage(self, step, state_dict, paths):
+    def save_to_storage(self, step, state_dict, paths, write_model=True):
         """
         Asynchonously saves the state dict into the storage. It synchonously
         saves the state dict into the shared memory and put the path
@@ -239,7 +243,7 @@ class MegatronDistCheckpointEngine(CheckpointEngine):
         """
         success = True
         if step > self._cached_step:
-            success = self.save_to_memory(step, state_dict, paths)
+            succeed = self.save_to_memory(step, state_dict, paths, write_model)
 
         if dist.is_initialized():
             dist.barrier()

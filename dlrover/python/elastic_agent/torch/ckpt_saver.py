@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -97,6 +98,7 @@ class CheckpointConfig:
     world_size: int = 0
     step: int = 0
     writing_shm: bool = False
+    write_model: bool = True
     paths: Dict[str, str] = None  # type: ignore
 
 
@@ -430,6 +432,7 @@ class AsyncCheckpointSaver(metaclass=ABCMeta):
         local_shard_num=1,
         global_shard_num=1,
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+        replica_count=0,
     ) -> None:
         logger.info(
             "Initializing the AsyncSaver with arguments: "
@@ -444,9 +447,11 @@ class AsyncCheckpointSaver(metaclass=ABCMeta):
         self._node_rank = env_utils.get_node_rank()
         self._is_agent_rank_0 = self._node_rank == 0
         self._shm_handlers: List[SharedMemoryHandler] = []
+        self._backup_shm_handlers: List[SharedMemoryHandler] = []
         self._shm_locks: List[SharedLock] = []
         self._stop_commit = False
         self._save_timeout = save_timeout
+        self._replicat_count = 0
 
         module = importlib.import_module(storage_meta.module_path)
         storage_class_def = getattr(module, storage_meta.class_name)
@@ -469,8 +474,26 @@ class AsyncCheckpointSaver(metaclass=ABCMeta):
 
         logger.info(f"AsyncSaver({self.__class__.__name__}) initialized.")
 
+        if replica_count != 0 :
+            self._replicat_count = replica_count
+            self.init_backup_group()
+
     def __del__(self):
         self.close()
+
+    def init_backup_group(self):
+        if self._replicat_count <= 0:
+            return
+
+        for i in range(1, self._replicat_count):
+            for j in range(self.local_shard_num):
+                self._backup_shm_handlers.append(SharedMemoryHandler(i*self.local_shard_num +j))
+        logger.info(
+            "Init_backup_group: "
+            f"_replicat_count={self._replicat_count}, "
+            f"local_shard_num={self.local_shard_num}, "
+        )
+        return
 
     def get_master_client(self):
         if self._master_client is None:
@@ -1076,6 +1099,8 @@ class CommonDirCheckpointSaver(AsyncCheckpointSaver):
     ):
         state_dict = self._shm_handlers[local_shard_id].load_state_dict()
         for state_name, sd in state_dict.items():
+            if not ckpt_config.write_model and state_name == CheckpointConstant.MODEL_STATES_NAME:
+                continue
             if sd and state_name in ckpt_config.paths:
                 path = ckpt_config.paths[state_name]
                 self.storage.write_state_dict(sd, path, torch.save)
@@ -1095,6 +1120,7 @@ class TempDirCheckpointSaver(AsyncCheckpointSaver):
         local_shard_num=1,
         global_shard_num=1,
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+        replica_count=0,
     ) -> None:
         super().__init__(
             checkpoint_dir,
@@ -1102,6 +1128,7 @@ class TempDirCheckpointSaver(AsyncCheckpointSaver):
             local_shard_num,
             global_shard_num,
             save_timeout,
+            replica_count
         )
 
         if self._node_rank == 0:
@@ -1347,6 +1374,61 @@ class DeepSpeedCheckpointSaver(CommonDirCheckpointSaver):
         )
         self.storage.write(str(step), ds_tracker_filename)
 
+class ColossalAICheckpointSaver(CommonDirCheckpointSaver):
+    TRACER_FILE = "latest.txt"
+    def update_tracker_file(self, step):
+        """
+        Write the step into the tracker file.
+
+        Args:
+            step (int): the checkpointing step.
+        """
+        tracker_filename = os.path.join(
+            self.checkpoint_dir, CheckpointConstant.TRACER_FILE_NAME
+        )
+        self.storage.write(str(step), tracker_filename)
+        tracker_filename = os.path.join(self.checkpoint_dir, self.TRACER_FILE)
+        self.storage.write(str(step), tracker_filename)
+
+    def persist_to_storage(
+        self,
+        local_shard_id: int,
+        ckpt_config: CheckpointConfig,
+    ):
+        """
+        Persist the state dict to a storage path.
+
+        Args:
+            local_shard_id (int): the index of local shard.
+            ckpt_config : the checkpoint config with the path to
+                save the storage.
+        checkpoint-format:
+        Xxx-step
+		|——Modeling(dp=0, tp=0)
+		|	|——pytorch_model.<prefix>-stage-000XX-shard-000XX.bin
+		|——Optimizer(dp=0, tp=0)
+		|	|——pytorch_optim.<prefix>-stage-000XX-shard-000XX.bin
+		|———Lr(rank=0)
+		|   |——xxx.bin
+		|
+		dlrover_latest.txt
+
+        state_dict-format:
+        {
+            "file-name" : content,
+            "file-name2" : content2,
+        }
+        paths-format:
+        {
+            "file-name" : path1,
+            "file-name2" : path2,
+        }
+        """
+        state_dict = self._shm_handlers[local_shard_id].load_state_dict()
+        paths = ckpt_config.paths
+        for name, sd in state_dict.items():
+            if name in paths:
+                self.storage.write_state_dict(sd, paths[name], torch.save)
 
 class FsdpDcpSaver(CommonDirCheckpointSaver):
     """The saver saves the distributed checkpoint of FSDP into the storage."""

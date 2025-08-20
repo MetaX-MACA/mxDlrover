@@ -1,3 +1,4 @@
+// 2025-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 // Copyright 2024 The DLRover Authors. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +35,10 @@
 #ifdef XPU_NVIDIA
 #include "xpu_timer/nvidia/nvidia_timer.h"
 using XPU_TIMER = xpu_timer::nvidia::NvidiaGpuTimer;
+#endif
+#ifdef XPU_MACA
+#include "xpu_timer/maca/maca_timer.h"
+using XPU_TIMER = xpu_timer::maca::MacaGpuTimer;
 #endif
 
 namespace bip = boost::interprocess;
@@ -570,7 +575,7 @@ void GpuTimerManager<XPU_TIMER>::doWork() {
 
     // rebuild item, generate name
     work_item->reBuild();
-    // generate kernel stack
+        // generate kernel stack
     if (work_item->py_stack) {
       py_stack_util_->insertPyStack(work_item->getName(), *work_item->py_stack);
       delete work_item->py_stack;
@@ -629,10 +634,10 @@ template <>
 void GpuTimerManager<XPU_TIMER>::pushItemsToMetricsManager(
     XPU_TIMER* work_item) {
   if (work_item->getType() == constant::Metrics::MatmulMetrics::TYPE) {
-    metrics_manager_->updateMetrics(work_item, XPU_TIMER::mmPerformance,
+        metrics_manager_->updateMetrics(work_item, XPU_TIMER::mmPerformance,
                                     XPU_TIMER::matmulBucketFn);
   } else if (work_item->getType() == constant::Metrics::CollMetrics::TYPE) {
-    metrics_manager_->updateMetrics(work_item, XPU_TIMER::collPerformance,
+        metrics_manager_->updateMetrics(work_item, XPU_TIMER::collPerformance,
                                     XPU_TIMER::collBucketFn);
   } else {
     metrics_manager_->updateMetrics(work_item, nullptr, nullptr);

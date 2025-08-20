@@ -1,3 +1,5 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -94,7 +96,7 @@ def print_process_list():
 
 def get_proc_env(pid):
     try:
-        with open(f"/proc/{pid}/environ", "rb+") as f:
+        with open(f"/proc/{pid}/environ", "rb") as f:
             data = f.read()
             envs = [chunk.decode("utf-8") for chunk in data.split(b"\x00")]
             return {

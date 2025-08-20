@@ -16,7 +16,7 @@ echo "Start installing CI python packages."
 start_time=$(date +%s)
 
 pip install -q kubernetes
-pip install -q grpcio-tools
+pip install -q grpcio-tools==1.58
 pip install -q psutil
 pip install -q deprecated
 pip install -q 'ray[default]'

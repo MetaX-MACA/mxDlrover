@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2022 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -67,6 +68,18 @@ def _get_training_job(*args, **kwargs):
     job = yaml.safe_load(job_content)
     return job
 
+def get_dragonfly_job(*args, **kwargs):
+    if _is_local():
+        with open("data/elasticjob_dragonfly.yaml", "r") as f:
+            job_content = f.read()
+    else:
+        with open(
+            "dlrover/python/tests/data" "/elasticjob_dragonfly.yaml", "r"
+        ) as f:
+            job_content = f.read()
+    job = yaml.safe_load(job_content)
+    return job
+
 
 def _get_pod(name):
     pod = client.V1Pod(
@@ -82,6 +95,11 @@ def _get_pod(name):
     )
     return pod
 
+def _get_configmap(name):
+    return client.V1ConfigMap(
+        api_version="v1",
+        data={}
+    )
 
 class MockK8sPSJobArgs(JobArgs):
     def __init__(self):
@@ -331,6 +349,7 @@ def mock_k8s_client():
         return_value=True
     )
     k8s_client.get_service = mock.MagicMock(return_value=False)  # type: ignore
+    k8s_client.get_configmap = _get_configmap
     return k8s_client
 
 

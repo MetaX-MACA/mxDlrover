@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -169,11 +170,12 @@ class RayElasticJob(ElasticJob):
 
 
 class RayJobArgs(JobArgs):
-    def __init__(self, platform, namespace, job_name):
+    def __init__(self, platform, namespace, job_name, folder_path=None):
         super(RayJobArgs, self).__init__(platform, namespace, job_name)
         self.file_path = "{}.json".format(job_name)
-        foler_path = os.path.dirname(os.path.dirname(__file__))
-        self.file_path = os.path.join(foler_path, "tests/test.json")
+        if folder_path is None or not os.path.exists(folder_path):
+            folder_path = os.path.dirname(os.path.dirname(__file__))
+        self.file_path = os.path.join(folder_path, "tests/test.json")
         self.stats_backend = LocalFileStateBackend(self.file_path)
 
     def initilize(self):

@@ -67,11 +67,13 @@ from dlrover.python.tests.test_utils import start_local_master
 
 class InferenceChainTest(unittest.TestCase):
     def setUp(self):
+        self.env_back = os.environ.copy()
         self._master, self._addr = start_local_master()
         MasterClient._instance = build_master_client(self._addr, 1)
 
     def tearDown(self):
         os.environ.clear()
+        os.environ.update(self.env_back)
         self._master.stop()
 
     def test_check_training_hang_operator_find_intersection(self):

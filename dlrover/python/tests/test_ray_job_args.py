@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,8 +36,8 @@ class RayJobArgsTest(unittest.TestCase):
             path = os.path.join(tmpdirname, "test.json")
             with open("test.json", "w") as f:
                 json.dump(data, f)
-
-        params = RayJobArgs(PlatformType.RAY, "default", "test")
+        ut_cases_path = os.path.join(os.environ.get('WORKSPACE', ''), 'map/testcases/dlrover/python')
+        params = RayJobArgs(PlatformType.RAY, "default", "test", ut_cases_path)
         self.assertEqual(params.job_name, "test")
         self.assertEqual(params.namespace, "default")
         params.initilize()

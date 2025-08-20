@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -181,6 +182,7 @@ class CheckpointEngine(metaclass=ABCMeta):
         comm_backend: str = "",
         save_timeout: int = CheckpointConstant.SAVE_TIMEOUT,
         replica_count=0,
+        local_shard_id = -1,
     ):
         logger.info(
             "Initializing checkpoint engine: "
@@ -195,6 +197,7 @@ class CheckpointEngine(metaclass=ABCMeta):
         self._save_timeout = save_timeout
         self._local_rank = env_utils.get_local_rank()
         self._cached_step = -1
+        self._replica_count = replica_count
         self._restart_count = env_utils.get_torch_restart_count()
 
         # init saver
@@ -212,7 +215,7 @@ class CheckpointEngine(metaclass=ABCMeta):
 
         # lock for shared memory
         local_shard_num = self.get_local_shard_num()
-        self.local_shard_id = self._local_rank % local_shard_num
+        self.local_shard_id = self._local_rank % local_shard_num if local_shard_id == -1 else local_shard_id
         lock_name = CheckpointSharedObjPrefix.SHM_LOCK_NAME + str(
             self.local_shard_id
         )
@@ -230,10 +233,11 @@ class CheckpointEngine(metaclass=ABCMeta):
         self._loader_group = None
         self._saver_group = None
         self._saving_ranks: Optional[List[int]] = None
+
         self._init_sync_group(comm_backend)
         shard_num = self.get_global_shard_num()
         self._replica_manager = CkptReplicaManger.create_replica_manager(
-            shard_num, replica_count
+            shard_num, replica_count, local_shard_num
         )
         logger.info(
             "Checkpoint engine initialized with "
@@ -312,6 +316,7 @@ class CheckpointEngine(metaclass=ABCMeta):
                 "local_shard_num": local_shard_num,
                 "global_shard_num": global_shard_num,
                 "save_timeout": self._save_timeout,
+                "replica_count": self._replica_count,
             },
         )
 
@@ -343,7 +348,7 @@ class CheckpointEngine(metaclass=ABCMeta):
 
     def save_state_dict_to_memory(self, state_dict, conf: CheckpointConfig):
         """Save the state dict into the memory."""
-        if self._local_rank != self.local_shard_id:
+        if self._saving_ranks is None and self._local_rank != self.local_shard_id:
             return False
         if self._saving_ranks and self._rank not in self._saving_ranks:
             return False
@@ -406,6 +411,11 @@ class CheckpointEngine(metaclass=ABCMeta):
             shm_size = byte_tensor.size()[0]
             self._shm_handler.init_shared_memory(create=True, size=shm_size)
             self._shm_handler.metadata.set(meta)
+            local_shm_tensor = torch.frombuffer(
+                buffer=self._shm_handler.shared_memory.buf,
+                dtype=torch.uint8,
+            )
+            local_shm_tensor.copy_(byte_tensor)
             logger.info(
                 f"Restore the checkpoint shard with size = {shm_size}"
                 "from the replica in the memory of the alive node."

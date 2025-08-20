@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -70,6 +71,7 @@ from dlrover.trainer.torch.flash_checkpoint.fsdp_engine import (
     _write_item,
     _write_memory_from_list,
 )
+from dlrover.trainer.torch.utils  import version_less_than_240
 
 _OPTIMIZER_KEY = "optimizer.params.group"
 _MODEL_TENSOR_KEY = "model.weights"
@@ -135,7 +137,10 @@ def _write_state_dict_to_shm(shared_memory, files, state_dict):
     writer = SharedMemoryWriter(shm_handler)
     plans = writer.prepare_global_plan([save_plan])
 
-    planner = DefaultSavePlanner()
+    if version_less_than_240():
+        planner = DefaultSavePlanner()
+    else:
+        planner = DefaultSavePlanner(flatten_state_dict=False, flatten_sharded_tensors=False)
     planner.set_up_planner(state_dict, True)
     fut = writer.write_data(plans[0], planner)
     fut.wait()
@@ -220,15 +225,26 @@ class FsdpCheckpointTest(unittest.TestCase):
             write_item=item,
             storage_key=file_name,
         )
-        self.assertEqual(offset, 463)
-        self.assertEqual(write_result.index.fqn, _OPTIMIZER_KEY)
-        self.assertEqual(write_result.size_in_bytes, 431)
-        self.assertEqual(write_result.storage_data.offset, 32)
-        self.assertEqual(write_result.storage_data.length, 431)
+
+        if version_less_than_240():
+            self.assertEqual(offset, 463)
+            self.assertEqual(write_result.index.fqn, _OPTIMIZER_KEY)
+            self.assertEqual(write_result.size_in_bytes, 431)
+            self.assertEqual(write_result.storage_data.offset, 32)
+            self.assertEqual(write_result.storage_data.length, 431)
+        else:
+            self.assertEqual(offset, 896)
+            self.assertEqual(write_result.index.fqn, _OPTIMIZER_KEY)
+            self.assertEqual(write_result.size_in_bytes, 864)
+            self.assertEqual(write_result.storage_data.offset, 32)
+            self.assertEqual(write_result.storage_data.length, 864)  
 
     def test_write_memory_from_list(self):
         files, state_dict = _maker_state_dict_files()
-        planner = DefaultSavePlanner()
+        if version_less_than_240():
+            planner = DefaultSavePlanner()
+        else:
+            planner = DefaultSavePlanner(flatten_state_dict=False, flatten_sharded_tensors=False)
         planner.set_up_planner(state_dict, True)
         write_results, no_shard_data = _write_memory_from_list(
             self.shm,
@@ -241,10 +257,16 @@ class FsdpCheckpointTest(unittest.TestCase):
 
     def test_get_buffer_size(self):
         files, state_dict = _maker_state_dict_files()
-        planner = DefaultSavePlanner()
+        if version_less_than_240():
+            planner = DefaultSavePlanner()
+        else:
+            planner = DefaultSavePlanner(flatten_state_dict=False, flatten_sharded_tensors=False)
         planner.set_up_planner(state_dict, True)
         size = _get_buffer_size(files, planner)
-        self.assertEqual(size, 463)
+        if version_less_than_240():
+            self.assertEqual(size, 463)
+        else:
+            self.assertEqual(size, 896)
 
     def test_shared_memory_writer(self):
         files, state_dict = _maker_state_dict_files()
@@ -288,7 +310,10 @@ class FsdpCheckpointTest(unittest.TestCase):
         reader.prepare_local_plan(load_plan)
         reader.prepare_global_plan([load_plan])
 
-        load_planner = DefaultLoadPlanner()
+        if version_less_than_240():
+            load_planner = DefaultLoadPlanner()
+        else:
+            load_planner = DefaultLoadPlanner(flatten_state_dict=False, flatten_sharded_tensors=False)
         load_planner.set_up_planner(state_dict, dcp_metadata, True)
         reader.read_data(load_plan, load_planner)
 
@@ -337,7 +362,10 @@ class FsdpCheckpointTest(unittest.TestCase):
             reader.prepare_local_plan(load_plan)
             reader.prepare_global_plan([load_plan])
 
-            load_planner = DefaultLoadPlanner()
+            if version_less_than_240():
+                load_planner = DefaultLoadPlanner()
+            else:
+                load_planner = DefaultLoadPlanner(flatten_state_dict=False, flatten_sharded_tensors=False)
             load_planner.set_up_planner(state_dict, metadata, True)
             reader.read_data(load_plan, load_planner)
 

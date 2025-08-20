@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2022 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,6 +38,7 @@ from dlrover.python.common.global_context import Context
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node, NodeResource
 from dlrover.python.master.scaler.base_scaler import ScalePlan, Scaler
+from dlrover.python.master.dragonfly.dragonfly_topo_v2 import DragonflyV2TopoManager
 from dlrover.python.scheduler.kubernetes import (
     NODE_SERVICE_PORTS,
     convert_cpu_to_decimal,
@@ -88,6 +90,7 @@ class PodScaler(Scaler):
     def __init__(self, job_name, namespace, error_monitor=None):
         super(PodScaler, self).__init__(job_name)
         self._k8s_client = k8sClient.singleton_instance(namespace)
+        self._topo_manager = DragonflyV2TopoManager.singleton_instance(namespace, job_name)
         self._svc_factory = k8sServiceFactory(namespace, job_name)
         self._namespace = namespace
         self._replica_template: Dict[str, client.V1Pod] = {}
@@ -533,6 +536,7 @@ class PodScaler(Scaler):
             "app": ElasticJobLabel.APP_NAME,
             ElasticJobLabel.JOB_KEY: self._job_name,
         }
+
         pod = self._create_pod_obj(
             name=pod_name,
             pod_template=pod_template,

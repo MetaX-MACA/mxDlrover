@@ -1,0 +1,63 @@
+apiVersion: elastic.iml.github.io/v1alpha1
+kind: ElasticJob
+metadata:
+  name: elasticjob-dragonfly
+  namespace: dlrover
+  uid: "111-222"
+spec:
+  distributionStrategy: AllreduceStrategy
+  optimizeMode: single-job
+  replicaSpecs:
+    worker:
+      restartCount: 3
+      replicas: 4
+      template:
+        metadata:
+          annotations:
+            metax-tech.com/gpu-group-size: "16"
+        spec:
+          hostNetwork: true
+          hostIPC: true
+          hostPID: true
+          dnsPolicy: ClusterFirstWithHostNet
+          nodeSelector:
+            metax-tech.com/gpu.product: "MXC500"
+            dlrover/tag3: "true"
+          restartPolicy: Always
+          containers:
+            - name: main
+              image: dlrover/elasticjob:iris_estimator
+              imagePullPolicy: Always
+              command:
+                  - python
+                  - -m
+                  - model_zoo.iris.dnn_estimator
+                  - --batch_size=32
+                  - --training_steps=1000
+              resources:
+                limits:
+                  metax-tech.com/gpu: 8
+                requests:
+                  cpu: 8
+              env:
+                - name: WORK_TIME
+                  value: '50'
+              securityContext:
+                privileged: true
+                capabilities:
+                  add:
+                    - NET_ADMIN
+              volumeMounts:
+                - name: shm-volume  # share-memory setting
+                  mountPath: /dev/shm
+                - name: nfs
+                  mountPath: /gpfs
+          volumes:
+          - name: shm-volume
+            emptyDir:
+              medium: Memory
+              sizeLimit: 100Gi
+          - name: nfs
+            hostPath:
+              path: /gpfs
+              type: Directory

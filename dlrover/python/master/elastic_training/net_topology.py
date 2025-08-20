@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2024 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dlrover.python.scheduler.kubernetes import k8sClient
+from dlrover.python.common.log import default_logger as logger
+
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
+from kubernetes import client
 
 from dlrover.python.common.serialize import JsonSerializable
 
@@ -48,6 +53,74 @@ class TopologySorter(metaclass=ABCMeta):
 class DefaultTopologyQuerier(TopologyQuerier):
     def query(self, node_ip) -> Tuple[str, str]:
         return "", ""
+
+
+class FileTopologyQuerier(TopologyQuerier):
+    '''
+    The querier reads the network topology configuration file
+    on the provided file path.
+
+    '''
+
+    def __init__(self, filename):
+        self.node_sw_config = {}
+        self._read_configfile(filename)
+
+    def _read_configfile(self, filename):
+        try:
+            logger.info("topology-configfile Data:")
+            with open(filename, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) == 3:
+                        asw, psw, ip = parts
+                        self.node_sw_config[ip] = (asw, psw)
+                        logger.info(f"ASW: {asw}, PSW: {psw}, IP Address: {ip}")
+        except FileNotFoundError as e:
+            logger.error(f"Failed to get topology_configfile, reason: {e}\n")
+
+    def query(self, node_ip) -> Tuple[str, str]:
+        try:
+            return self.node_sw_config[node_ip]
+        except KeyError:
+            return "", ""
+
+
+class ConfigmapTopologyQuerier(TopologyQuerier):
+    '''
+    The querier reads the node-topology-config configuration in the
+    provided namespace. In debug mode quier will handle appropriate
+    exceptions if there is no configmap or no matching configuration
+
+    '''
+
+    def __init__(self, namespace):
+        self.node_sw_config = {}
+        self._read_configmap(namespace)
+
+    def _read_configmap(self, namespace):
+        self._k8s_client = k8sClient.singleton_instance(namespace)
+        try:
+            configmap = self._k8s_client.get_configmap("node-topology-config")
+            logger.info("configmap node-topology-config Data:")
+            try:
+                lines = configmap.data['topology_config'].splitlines()
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) == 3:
+                        asw, psw, ip = parts
+                        self.node_sw_config[ip] = (asw, psw)
+                        logger.info(f"ASW: {asw}, PSW: {psw}, IP Address: {ip}")
+            except KeyError:
+                logger.info("configmap is missing topology_config")
+        except client.ApiException as e:
+            logger.error(f"Failed to get topology-configmap, reason: {e}\n")
+
+    def query(self, node_ip) -> Tuple[str, str]:
+        try:
+            return self.node_sw_config[node_ip]
+        except KeyError:
+            return "", ""
 
 
 class DpTopologySorter(TopologySorter):

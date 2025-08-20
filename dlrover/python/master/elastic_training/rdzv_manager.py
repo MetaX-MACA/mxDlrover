@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,6 +29,7 @@ from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node
 from dlrover.python.master.elastic_training.net_topology import (
     DefaultTopologyQuerier,
+    ConfigmapTopologyQuerier,
     DpTopologySorter,
     NodeTopologyMeta,
 )
@@ -58,7 +60,7 @@ class RendezvousParameters(object):
 
 
 class RendezvousManager(metaclass=ABCMeta):
-    def __init__(self, error_monitor=None):
+    def __init__(self, error_monitor=None, namespace=None):
         self._lock = Lock()
         self._alive_nodes = set()
         self._released_workers = []
@@ -77,7 +79,11 @@ class RendezvousManager(metaclass=ABCMeta):
         self._latest_log_nodes_time = 0
         # key is the node rank, value is the step.
         self._save_ckpt_nodes: Dict[int, int] = {}
-        self._topology_querier = DefaultTopologyQuerier()
+        # local job can skip namespace injection
+        if namespace:
+            self._topology_querier = ConfigmapTopologyQuerier(namespace)
+        else:
+            self._topology_querier = DefaultTopologyQuerier()
         self._topology_sorter = DpTopologySorter()
         self._error_monitor = error_monitor
 
@@ -405,8 +411,8 @@ class ElasticTrainingRendezvousManager(RendezvousManager):
     Elasticjob of DLRover, the node has an unique node ID.
     """
 
-    def __init__(self, error_monitor=None):
-        super().__init__(error_monitor)
+    def __init__(self, error_monitor=None, namespace=None):
+        super().__init__(error_monitor, namespace)
         self._name = RendezvousName.ELASTIC_TRAINING
 
     def get_comm_world(
@@ -507,8 +513,8 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         node-1 if not available.
     """
 
-    def __init__(self, error_monitor=None):
-        super().__init__(error_monitor)
+    def __init__(self, error_monitor=None, namespace=None, enable_dragonfly = False):
+        super().__init__(error_monitor, namespace)
         self._name = RendezvousName.NETWORK_CHECK
         self._node_status: Dict[int, bool] = {}
         self._node_times: Dict[int, float] = {}
@@ -517,6 +523,7 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         self._check_round = 2
         self._fault_nodes = set()
         self._straggler_nodes = set()
+        self._enable_dragonfly = enable_dragonfly
 
     def _get_print_node_groups(self):
         printing_node_groups = []
@@ -614,11 +621,22 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         node_groups: List[Dict[int, int]] = []
         if round == 0:
             group = {}
-            for node_id, meta in self._rdzv_nodes.items():
-                group[node_id] = meta
-                if len(group) == 2:
-                    node_groups.append(group)
+            if self._enable_dragonfly:
+                left, right = 0, len(self._rdzv_nodes) - 1
+                while right >= left:
                     group = {}
+                    group[left] = self._rdzv_nodes[left]
+                    group[right] = self._rdzv_nodes[right]
+                    if len(group) == 2:
+                        node_groups.append(group)
+                    left += 1
+                    right -= 1
+            else:
+                for node_id, meta in self._rdzv_nodes.items():
+                    group[node_id] = meta
+                    if len(group) == 2:
+                        node_groups.append(group)
+                        group = {}
             if len(group) == 1:
                 if len(node_groups) > 0:
                     node_groups[-1].update(group)

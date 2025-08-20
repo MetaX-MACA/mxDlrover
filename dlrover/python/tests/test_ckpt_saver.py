@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -270,7 +271,7 @@ class CheckpointSaverTest(unittest.TestCase):
             handler(None, None)
             with self.assertRaises(KeyboardInterrupt):
                 handler = signal.getsignal(signal.SIGINT)
-                handler(None, None)
+                handler(signal.SIGINT, None)
             ckpt_files = os.listdir(tmpdir)
             self.assertEqual(len(ckpt_files), 3)
             saver.close()

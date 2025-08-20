@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2024 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,12 +55,16 @@ def pipe_commands(commands):
 
 
 def find_python_releated():
-    from torch.utils import cpp_extension
+    try:
+        from torch.utils import cpp_extension
+        torch_path = str(Path(cpp_extension.TORCH_LIB_PATH).parent)
+    except:
+        torch_path = ""
 
     return {
         "python_lib": f'{sysconfig.get_config_var("LIBDIR")}/libpython{sysconfig.get_python_version()}.so',
         "python_include": sysconfig.get_config_var("INCLUDEPY"),
-        "torch_path": str(Path(cpp_extension.TORCH_LIB_PATH).parent),
+        "torch_path": torch_path,
     }
 
 

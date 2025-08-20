@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2022 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -136,11 +137,17 @@ class DistributedJobMaster(JobMaster):
             if args.enable_dynamic_sharding
             else None
         )
-        elastic_training = RendezvousName.ELASTIC_TRAINING
+        elasticTraining = RendezvousName.ELASTIC_TRAINING
+        networkCheck = RendezvousName.NETWORK_CHECK
         self.rdzv_managers: Dict[str, RendezvousManager] = {
-            elastic_training: ElasticTrainingRendezvousManager(error_monitor),
-            RendezvousName.NETWORK_CHECK: NetworkCheckRendezvousManager(
-                error_monitor
+            elasticTraining: ElasticTrainingRendezvousManager(
+                error_monitor = error_monitor,
+                namespace = args.namespace
+            ),
+            networkCheck: NetworkCheckRendezvousManager(
+                error_monitor = error_monitor,
+                namespace = args.namespace,
+                enable_dragonfly = self.job_manager._enable_dragonfly
             ),
         }
         self.diagnosis_manager = DiagnosisManager()

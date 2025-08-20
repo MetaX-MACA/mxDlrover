@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -149,6 +150,7 @@ class DeepSpeedCheckpointTest(unittest.TestCase):
                 if time.time() - start > 10:
                     break
 
+            time.sleep(2) #wait tracer_file update
             with open(tracer_file, "r") as f:
                 restored_step = int(f.read())
             self.assertTrue(os.path.exists(tracer_file))

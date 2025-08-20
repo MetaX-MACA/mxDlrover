@@ -1,0 +1,26 @@
+# Default values for dlrover.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+registry: "cr.metax-tech.com/cloud"
+    
+topoMapper:
+  topology_config: |
+    asw-0 psw-0 192.168.0.0
+    asw-1 psw-0 192.168.0.1
+    asw-2 psw-0 192.168.0.2
+    asw-3 psw-0 192.168.0.3
+    asw-0 psw-0 192.168.0.4
+    asw-1 psw-0 192.168.0.5
+    asw-2 psw-0 192.168.0.6
+    asw-3 psw-0 192.168.0.7
+    asw-0 psw-0 192.168.0.8
+    asw-1 psw-0 192.168.0.9
+
+controller:
+  image:
+    name: "elasticjob-controller"
+
+dlroverMaster:
+  image:
+    name: "dlrover-master"

@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,9 +23,14 @@ import torch.distributed as dist
 from dlrover.python.common.log import default_logger as logger
 
 try:
-    from megatron import get_args
-    from megatron.checkpointing import load_checkpoint as megatron_load
-    from megatron.checkpointing import save_checkpoint as megatron_save
+    try:
+        from megatron.training import get_args
+        from megatron.training.checkpointing import load_checkpoint as megatron_load
+        from megatron.training.checkpointing import save_checkpoint as megatron_save
+    except ImportError:
+        from megatron import get_args
+        from megatron.checkpointing import load_checkpoint as megatron_load
+        from megatron.checkpointing import save_checkpoint as megatron_save
 except ImportError:
     logger.warning("Please check the magatron.checkpointing exists.")
 
@@ -234,7 +240,7 @@ def load_checkpoint(
     args = get_args()
     checkpointer = MegatronCheckpointer.singleton_instance(
         args.save,
-        storge=storage,
+        storage=storage,
         comm_backend=comm_backend,
         save_timeout=save_timeout,
         replica_count=replica_count,

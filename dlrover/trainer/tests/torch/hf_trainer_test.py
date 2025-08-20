@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2024 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +15,7 @@
 import os
 import tempfile
 import unittest
+import pytest
 
 from transformers import LlamaConfig, LlamaForCausalLM, TrainingArguments
 
@@ -35,6 +37,7 @@ class FlashCkptTrainerTest(unittest.TestCase):
             DdpCheckpointSaver._saver_instance.close()
         clear_sock_dir()
 
+    @pytest.mark.filterwarnings("ignore::Warning")
     def test_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             training_arguments = TrainingArguments(

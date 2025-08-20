@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +15,7 @@
 from setuptools import find_packages, setup
 
 install_requires = [
-    "grpcio>=1.58.0",
+    "grpcio-tools>=1.58.0,<=1.62",
     "psutil",
     "pynvml",
     "urllib3<1.27,>=1.21.1",
@@ -34,7 +35,7 @@ extra_require = {
 
 setup(
     name="dlrover",
-    version="0.3.9rc0",
+    version="0.4.0",
     description="An Automatic Distributed Deep Learning Framework",
     long_description="DLRover helps model developers focus on model algorithm"
     " itself, without taking care of any engineering stuff,"

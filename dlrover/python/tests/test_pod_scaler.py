@@ -1,3 +1,4 @@
+# 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
 # Copyright 2022 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -42,7 +43,7 @@ class PodScalerTest(unittest.TestCase):
         mock_k8s_client()
 
     def tearDown(self) -> None:
-        os.environ.clear()
+        del os.environ["POD_IP"]
 
     def test_init_pod_template(self):
         error_monitor = SimpleErrorMonitor()
@@ -126,9 +127,10 @@ class PodScalerTest(unittest.TestCase):
             return_value=True
         )
         _dlrover_ctx.config_master_port()
-
+        scaler._check_master_service_avaliable = unittest.mock.MagicMock(
+            return_value=False
+        )
         scaler.start()
-        scaler._init_pod_config_by_job()
         scaler._distribution_strategy = DistributionStrategy.PS
         resource = NodeResource(4, 8192)
         node = Node(NodeType.WORKER, 0, resource, rank_index=0)

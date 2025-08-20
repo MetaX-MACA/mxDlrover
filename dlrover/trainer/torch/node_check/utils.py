@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -166,7 +167,7 @@ def _execute_cpu_comm(comm_op, *args):
     for _ in range(10):
         comm_op(*args)
 
-    round_num = 20
+    round_num = 200
     start = time.time()
     for _ in range(round_num):
         comm_op(*args)

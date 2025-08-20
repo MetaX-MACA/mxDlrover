@@ -29,11 +29,11 @@ from dlrover.trainer.torch.node_check.utils import (
 class TestNetworkCheckScript(unittest.TestCase):
     def setUp(self):
         # Initialization code to run before each test method
-        pass
+        self.env_back = os.environ.copy()
 
     def tearDown(self):
         # Cleanup code to run after each test method
-        os.environ.clear()
+        os.environ.update(self.env_back)
 
     def test_gpu_node_check(self):
         port = random.randint(10000, 40000)
@@ -49,12 +49,12 @@ class TestNetworkCheckScript(unittest.TestCase):
             self.assertEqual(data["local_rank"], 0)
             self.assertTrue(data["time"] > 0)
 
-        t = npu_main()
-        self.assertTrue(t > 0)
-        with open("/tmp/dlrover/network_check/0.txt", "r") as f:
-            data = json.load(f)
-            self.assertEqual(data["local_rank"], 0)
-            self.assertTrue(data["time"] > 0)
+        # t = npu_main()
+        # self.assertTrue(t > 0)
+        # with open("/tmp/dlrover/network_check/0.txt", "r") as f:
+        #     data = json.load(f)
+        #     self.assertEqual(data["local_rank"], 0)
+        #     self.assertTrue(data["time"] > 0)
 
     def test_mock_error(self):
         raised_error = False

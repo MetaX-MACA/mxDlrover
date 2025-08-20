@@ -1,3 +1,4 @@
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 # Copyright 2023 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,7 +29,6 @@ try:
     from megatron.core.num_microbatches_calculator import (
         update_num_microbatches,
     )
-    from megatron.core.optimizer.optimizer import ChainedOptimizer
     from megatron.training import get_args
     from megatron.training.checkpointing import (
         check_checkpoint_args,
@@ -57,7 +57,6 @@ except ImportError:
             read_metadata,
             set_checkpoint_version,
         )
-        from megatron.optimizer.optimizer import ChainedOptimizer
         from megatron.utils import print_rank_0, unwrap_model
     except ImportError:
         logger.warning("Please check the magatron.checkpointing exists.")
@@ -156,6 +155,7 @@ class MegatronDistCheckpointer(Singleton):
         comm_backend="",
         use_distributed_optimizer=False,
         save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+        replica_count=0,
     ):
         self.storage = PosixDiskStorage() if not storage else storage
         if use_distributed_optimizer:
@@ -164,6 +164,7 @@ class MegatronDistCheckpointer(Singleton):
                 storage=self.storage,
                 comm_backend=comm_backend,
                 save_timeout=save_timeout,
+                replica_count=replica_count,
             )
         else:
             self.engine = MegatronCheckpointEngine(
@@ -171,8 +172,19 @@ class MegatronDistCheckpointer(Singleton):
                 storage=self.storage,
                 comm_backend=comm_backend,
                 save_timeout=save_timeout,
+                replica_count=replica_count,
             )
 
+def is_chained_optimizer(optimizer) -> bool:
+    try:
+        try:
+            from megatron.core.optimizer import ChainedOptimizer
+        except ImportError:
+            from megatron.optimizer.optimizer import ChainedOptimizer
+        return isinstance(optimizer, ChainedOptimizer)
+    except ImportError:
+        logger.info("ChainedOptimizer is not defined")
+        return False
 
 def save_checkpoint(
     iteration,
@@ -184,6 +196,7 @@ def save_checkpoint(
     comm_backend="",
     deletion_strategy=None,
     save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+    replica_count=0,
 ):
     """
     Save a model checkpoint.
@@ -207,6 +220,7 @@ def save_checkpoint(
         comm_backend=comm_backend,
         use_distributed_optimizer=args.use_distributed_optimizer,
         save_timeout=save_timeout,
+        replica_count=replica_count,
     )
 
     # Only rank zero of the data parallel writes to the disk.
@@ -236,46 +250,57 @@ def save_checkpoint(
         and not args.no_save_optim
         and optimizer is not None
     ):
-        if isinstance(optimizer, ChainedOptimizer):
+        if is_chained_optimizer(optimizer):
             dist_opter_state = get_chained_optimizer_parameter_state(optimizer)
         else:
             dist_opter_state = get_parameter_state(optimizer)
+    try:
+        # 新版本接口
+        from megatron.core import parallel_state
+        get_expert_data_parallel_rank = parallel_state.get_expert_data_parallel_rank
+    except ImportError:
+        # 老版本 fallback
+        from megatron.core import mpu
+        get_expert_data_parallel_rank = mpu.get_data_modulo_expert_parallel_rank
 
+    write_model = False
     # Collect args, model, RNG.
     if (
         not torch.distributed.is_initialized()
-        or mpu.get_data_modulo_expert_parallel_rank() == 0
+        or get_expert_data_parallel_rank() == 0
     ):
-        # Arguments, iteration, and model.
-        model_state_dict["args"] = args
-        model_state_dict["checkpoint_version"] = 3.0
-        model_state_dict["iteration"] = iteration
-        model_state_dict[
-            "num_floating_point_operations_so_far"
-        ] = num_floating_point_operations_so_far
-        if len(model) == 1:
-            model_state_dict["model"] = model[
-                0
+        write_model = True
+    
+    # Arguments, iteration, and model.
+    model_state_dict["args"] = args
+    model_state_dict["checkpoint_version"] = 3.0
+    model_state_dict["iteration"] = iteration
+    model_state_dict[
+        "num_floating_point_operations_so_far"
+    ] = num_floating_point_operations_so_far
+    if len(model) == 1:
+        model_state_dict["model"] = model[
+            0
+        ].state_dict_for_save_checkpoint()
+    else:
+        for i in range(len(model)):
+            mpu.set_virtual_pipeline_model_parallel_rank(i)
+            model_state_dict["model%d" % i] = model[
+                i
             ].state_dict_for_save_checkpoint()
-        else:
-            for i in range(len(model)):
-                mpu.set_virtual_pipeline_model_parallel_rank(i)
-                model_state_dict["model%d" % i] = model[
-                    i
-                ].state_dict_for_save_checkpoint()
 
-        # Optimizer stuff.
-        if not args.no_save_optim:
-            if optimizer is not None:
-                model_state_dict["optimizer"] = optimizer.state_dict()
-            if opt_param_scheduler is not None:
-                model_state_dict[
-                    "opt_param_scheduler"
-                ] = opt_param_scheduler.state_dict()
+    # Optimizer stuff.
+    if not args.no_save_optim:
+        if optimizer is not None:
+            model_state_dict["optimizer"] = optimizer.state_dict()
+        if opt_param_scheduler is not None:
+            model_state_dict[
+                "opt_param_scheduler"
+            ] = opt_param_scheduler.state_dict()
 
-        # RNG states.
-        if not args.no_save_rng:
-            model_state_dict["rng_state"] = rng_state
+    # RNG states.
+    if not args.no_save_rng:
+        model_state_dict["rng_state"] = rng_state
 
     ckpt_sds = {}
     paths = {}
@@ -287,9 +312,9 @@ def save_checkpoint(
         paths[CheckpointConstant.OPTIM_STATES_NAME] = optim_checkpoint_name
 
     if storage_type == StorageType.MEMORY:
-        checkpointer.engine.save_to_memory(iteration, ckpt_sds, paths)
+        checkpointer.engine.save_to_memory(iteration, ckpt_sds, paths, write_model)
     else:
-        checkpointer.engine.save_to_storage(iteration, ckpt_sds, paths)
+        checkpointer.engine.save_to_storage(iteration, ckpt_sds, paths, write_model)
 
     # Wait so everyone is done (necessary)
     if torch.distributed.is_initialized():
@@ -323,7 +348,11 @@ def get_parameter_state(dist_optimizer):
         buffers.
     """
     state = {}
-    for _, gbuf_range_maps in enumerate(dist_optimizer.gbuf_ranges):
+    try:
+        gbuf_ranges = dist_optimizer.gbuf_ranges
+    except AttributeError:
+        gbuf_ranges = dist_optimizer.model_gbuf_ranges
+    for _, gbuf_range_maps in enumerate(gbuf_ranges):
 
         # Iterate grad buffers (by data type).
         assert len(gbuf_range_maps) == 1, "single dtype supported, for now."
@@ -379,6 +408,7 @@ def load_checkpoint(
     comm_backend="",
     deletion_strategy=None,
     save_timeout=CheckpointConstant.SAVE_TIMEOUT,
+    replica_count=0,
 ):
     """Load a model checkpoint and return the iteration.
     strict (bool): whether to strictly enforce that the keys in
@@ -403,6 +433,7 @@ def load_checkpoint(
         comm_backend=comm_backend,
         use_distributed_optimizer=args.use_distributed_optimizer,
         save_timeout=save_timeout,
+        replica_count=replica_count,
     )
 
     model = unwrap_model(model)
@@ -411,15 +442,26 @@ def load_checkpoint(
         opt_state_dict,
         checkpoint_name,
         release,
+        step,
     ) = _load_checkpoint_from_memory(checkpointer)
 
-    if not model_state_dict:
-        (
-            model_state_dict,
-            opt_state_dict,
-            checkpoint_name,
-            release,
-        ) = _load_base_checkpoint(load_dir, rank0=False)
+    (iteration, release,) = _load_iteration_release(load_dir, rank0=False)
+    if iteration == 0 and step == 0:
+        model_state_dict = None
+        opt_state_dict = None
+    else:
+        if not model_state_dict or step < iteration:
+            (
+                model_state_dict,
+                checkpoint_name,
+            ) = _load_model_from_base_checkpoint(
+                load_dir, iteration, release, rank0=False
+            )
+
+        if not opt_state_dict or step < iteration:
+            opt_state_dict = _load_opt_from_base_checkpoint(
+                load_dir, iteration, release, rank0=False
+            )
 
     # Checkpoint not loaded.
     if model_state_dict is None:
@@ -502,15 +544,15 @@ def load_checkpoint(
             # Load state dict.
             if optimizer is not None:
                 optimizer.load_state_dict(model_state_dict["optimizer"])
-            if args.use_distributed_optimizer:
-                if isinstance(optimizer, ChainedOptimizer):
-                    load_chained_optimizer_parameter_state(
-                        optimizer, opt_state_dict
-                    )
-                else:
-                    load_parameter_state_from_state_dict(
-                        optimizer, opt_state_dict
-                    )
+                if args.use_distributed_optimizer:
+                    if is_chained_optimizer(optimizer):
+                        load_chained_optimizer_parameter_state(
+                            optimizer, opt_state_dict
+                        )
+                    else:
+                        load_parameter_state_from_state_dict(
+                            optimizer, opt_state_dict
+                        )
 
             # Load scheduler.
             if opt_param_scheduler is not None:
@@ -594,14 +636,10 @@ def _load_checkpoint_from_memory(checkpointer):
     opt_state_dict = state_dict.get(CheckpointConstant.OPTIM_STATES_NAME, {})
     checkpoint_name = "iter_{:07d}".format(step)
     release = False
-    return model_state_dict, opt_state_dict, checkpoint_name, release
+    return model_state_dict, opt_state_dict, checkpoint_name, release, step
 
 
-def _load_base_checkpoint(load_dir, rank0=False):
-    """Load the base state_dict from the given directory
-
-    If rank0 is true, just loads rank 0 checkpoint, ignoring arguments.
-    """
+def _load_iteration_release(load_dir, rank0=False):
     # Read the tracker file and set the iteration.
     tracker_filename = get_checkpoint_tracker_filename(load_dir)
 
@@ -609,20 +647,21 @@ def _load_base_checkpoint(load_dir, rank0=False):
     if not os.path.isfile(tracker_filename):
         if not rank0:
             print_rank_0(
-                "WARNING: could not find the metadata file {} ".format(
-                    tracker_filename
-                )
+                "WARNING: could not find the metadata file {} ".format(tracker_filename)
             )
             print_rank_0(
-                "    will not load any checkpoints and will start from "
-                "random"
+                "    will not load any checkpoints and will start from " "random"
             )
-        return None, None, "", False
+        return 0, 0
 
     # Otherwise, read the tracker file and either set the iteration or
     # mark it as a release checkpoint.
     iteration, release = read_metadata(tracker_filename)
+    return iteration, release
 
+
+def _load_model_from_base_checkpoint(load_dir, iteration, release, rank0=False):
+    """Load the base state_dict from the given directory"""
     # Checkpoint.
     if rank0:
         checkpoint_name = find_checkpoint_rank_0(load_dir, iteration, release)
@@ -631,34 +670,46 @@ def _load_base_checkpoint(load_dir, rank0=False):
         if release:
             print_rank_0(f" loading release checkpoint from {load_dir}")
         else:
-            print_rank_0(
-                f" loading checkpoint from {load_dir} at iteration {iteration}"
-            )
+            print_rank_0(f" loading checkpoint from {load_dir} at iteration {iteration}")
 
+    # Load the checkpoint.
+    try:
+        model_state_dict = torch.load(checkpoint_name, map_location="cpu")
+    except BaseException as e:
+        print_rank_0("could not load the checkpoint")
+        print_rank_0(e)
+        sys.exit()
+
+    return model_state_dict, checkpoint_name
+
+
+def _load_opt_from_base_checkpoint(load_dir, iteration, release, rank0=False):
+    """Load the optimizer state_dict from the given directory"""
     dist_opt_checkpoint_name = get_dist_optimizer_checkpoint_name(
         load_dir, iteration, release
     )
 
     # Load the checkpoint.
     try:
-        model_state_dict = torch.load(checkpoint_name, map_location="cpu")
         opt_state_dict = {}
         if os.path.exists(dist_opt_checkpoint_name):
-            opt_state_dict = torch.load(
-                dist_opt_checkpoint_name, map_location="cpu"
-            )
+            opt_state_dict = torch.load(dist_opt_checkpoint_name, map_location="cpu")
     except BaseException as e:
         print_rank_0("could not load the checkpoint")
         print_rank_0(e)
         sys.exit()
 
-    return model_state_dict, opt_state_dict, checkpoint_name, release
+    return opt_state_dict
 
 
 def load_parameter_state_from_state_dict(dist_optimizer, state_dict):
     """Load parameter state (i.e., parameter & optimizer tensors)."""
     # Scatter tensors to all DP ranks.
-    for gbuf_idx, gbuf_range_maps in enumerate(dist_optimizer.gbuf_ranges):
+    try:
+        gbuf_ranges = dist_optimizer.gbuf_ranges
+    except AttributeError:
+        gbuf_ranges = dist_optimizer.model_gbuf_ranges
+    for gbuf_idx, gbuf_range_maps in enumerate(gbuf_ranges):
         for dtype, gbuf_range_map_for_all_buckets in gbuf_range_maps.items():
             for bucket_idx, gbuf_range_map in enumerate(
                 gbuf_range_map_for_all_buckets
