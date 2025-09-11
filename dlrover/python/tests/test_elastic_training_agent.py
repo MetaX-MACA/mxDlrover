@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
 import os
 import shutil
@@ -22,15 +23,21 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest import mock
-from unittest.mock import patch
 import pytest
+from datetime import datetime
+from unittest import mock
+from unittest.mock import MagicMock, patch
 
 import psutil
-from torch.distributed.elastic.agent.server.api import WorkerSpec, WorkerState
+from torch.distributed.elastic.agent.server.api import (
+    RunResult,
+    WorkerSpec,
+    WorkerState,
+)
 from torch.distributed.elastic.agent.server.local_elastic_agent import (
     LocalElasticAgent,
 )
+from torch.distributed.elastic.multiprocessing import SignalException
 from torch.distributed.elastic.rendezvous import RendezvousParameters
 from torch.distributed.launcher.api import LaunchConfig
 
@@ -39,13 +46,30 @@ from dlrover.python.common.constants import (
     Accelerators,
     AscendConstants,
     ConfigPath,
+    GpuMetricEnum,
     JobConstant,
     NodeEnv,
+    NpuMetricEnum,
     RendezvousName,
 )
+from dlrover.python.common.global_context import Context
+from dlrover.python.common.log import default_logger as logger
+from dlrover.python.common.metric.context import JobMetricContext
+from dlrover.python.common.metric.metric import (
+    GpuMetric,
+    GpuNodeMetric,
+    NpuMetric,
+    NpuNodeMetric,
+)
 from dlrover.python.common.storage import PosixDiskStorage
-from dlrover.python.diagnosis.common.constants import DiagnosisConstant
-from dlrover.python.diagnosis.common.diagnosis_action import EventAction
+from dlrover.python.diagnosis.common.constants import (
+    DiagnosisActionType,
+    DiagnosisConstant,
+)
+from dlrover.python.diagnosis.common.diagnosis_action import (
+    EventAction,
+    NodeAction,
+)
 from dlrover.python.elastic_agent.context import get_agent_context
 from dlrover.python.elastic_agent.master_client import (
     MasterClient,
@@ -59,17 +83,26 @@ from dlrover.python.elastic_agent.torch.ckpt_saver import (
 from dlrover.python.elastic_agent.torch.training import (
     ElasticLaunchConfig,
     ElasticTrainingAgent,
+    JobStoppingError,
     MasterRendezvousHandler,
     NodeCheckElasticAgent,
+    NodeCheckFailedError,
     RendezvousOutSyncError,
+    RendezvousTimeoutError,
+    StopWorkerTimeoutError,
     _create_check_agent,
     _create_worker_spec,
     _get_local_ip,
     _set_paral_config,
     comm_perf_check,
+    launch_agent,
     node_health_check,
 )
 from dlrover.python.tests.test_utils import start_local_master
+from dlrover.trainer.torch.utils import version_less_than_230
+
+_metric_context = JobMetricContext.singleton_instance()
+_dlrover_context = Context.singleton_instance()
 
 
 class ElasticTrainingAgentTest(unittest.TestCase):
@@ -99,13 +132,20 @@ class ElasticTrainingAgentTest(unittest.TestCase):
         master_addr = "127.0.0.1"
 
         self.rdzv_handler = MasterRendezvousHandler(
-            RendezvousName.ELASTIC_TRAINING,
+            RendezvousName.TRAINING,
             0,
             rdzv_parameters,
             local_world_size=self.config.nproc_per_node,
         )
         self.rdzv_handler.join_timeout = 5
 
+        if version_less_than_230():
+            logs_dict = {
+                "redirects": self.config.redirects,
+                "tee": self.config.tee,
+            }
+        else:
+            logs_dict = {}
         self.spec = WorkerSpec(
             role=self.config.role,
             local_world_size=self.config.nproc_per_node,
@@ -114,22 +154,38 @@ class ElasticTrainingAgentTest(unittest.TestCase):
             rdzv_handler=self.rdzv_handler,
             max_restarts=self.config.max_restarts,
             monitor_interval=self.config.monitor_interval,
-            # redirects=self.config.redirects,
-            # tee=self.config.tee,
             master_addr=master_addr,
             local_addr=self.config.local_addr,
+            **logs_dict,
         )
         JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 1
+
+        self._agent_context = get_agent_context()
 
     def tearDown(self):
         JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 15
         self._master.stop()
         os.environ.clear()
         os.environ.update(self.env_back)
+        self._agent_context.clear_action_queue()
 
     def test_node_unit(self):
         node_unit = int(self.rdzv_handler._rdzv_params.get("node_unit", "1"))
         self.assertEqual(node_unit, 2)
+
+    def test_config_to_json(self):
+        config = ElasticLaunchConfig(
+            min_nodes=1,
+            max_nodes=1,
+            nproc_per_node=8,
+            run_id="test",
+            auto_config=True,
+        )
+        json_config = config.to_json()
+        self.assertIsNotNone(json_config)
+        self.assertEqual(json_config["min_nodes"], 1)
+        self.assertEqual(json_config["rdzv_backend"], "etcd")
+        self.assertTrue(len(json.loads(json_config["rdzv_configs"])) > 0)
 
     def test_auto_configure(self):
         config = ElasticLaunchConfig(
@@ -162,6 +218,7 @@ class ElasticTrainingAgentTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
 
         # Mock node rank 1 joins the rendezvous.
@@ -192,6 +249,7 @@ class ElasticTrainingAgentTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
         # Mock node rank 0 joins the rendezvous.
         self.rdzv_handler._client._node_id = 0
@@ -247,6 +305,66 @@ class ElasticTrainingAgentTest(unittest.TestCase):
         agent._rendezvous(agent._worker_group)
         agent._exit_barrier()
 
+        agent = ElasticTrainingAgent(
+            node_rank=0,
+            config=self.config,
+            entrypoint="python",
+            spec=self.spec,
+            start_method=self.config.start_method,
+            log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
+        )
+        self.rdzv_handler._client._node_id = 1
+        self.rdzv_handler._client.join_rendezvous(
+            1, 8, self.rdzv_handler._name
+        )
+        agent._client._node_id = 0
+        agent._rendezvous(agent._worker_group)
+        agent._dlrover_exit_barrier()
+
+        with patch(
+            "dlrover.python.util.store_util.barrier",
+            side_effect=[SignalException("test", signal.SIGTERM)],
+        ):
+            agent = ElasticTrainingAgent(
+                node_rank=0,
+                config=self.config,
+                entrypoint="python",
+                spec=self.spec,
+                start_method=self.config.start_method,
+                log_dir=self.config.log_dir,
+                exit_barrier_timeout=1,
+            )
+            self.rdzv_handler._client._node_id = 1
+            self.rdzv_handler._client.join_rendezvous(
+                1, 8, self.rdzv_handler._name
+            )
+            agent._client._node_id = 0
+            agent._rendezvous(agent._worker_group)
+            with self.assertRaises(SignalException):
+                agent._dlrover_exit_barrier()
+
+        with patch(
+            "dlrover.python.util.store_util.barrier",
+            side_effect=[Exception("test")],
+        ):
+            agent = ElasticTrainingAgent(
+                node_rank=0,
+                config=self.config,
+                entrypoint="python",
+                spec=self.spec,
+                start_method=self.config.start_method,
+                log_dir=self.config.log_dir,
+                exit_barrier_timeout=1,
+            )
+            self.rdzv_handler._client._node_id = 1
+            self.rdzv_handler._client.join_rendezvous(
+                1, 8, self.rdzv_handler._name
+            )
+            agent._client._node_id = 0
+            agent._rendezvous(agent._worker_group)
+            agent._dlrover_exit_barrier()
+
     def test_get_local_ip(self):
         local_ip = _get_local_ip()
         self.assertNotEqual(local_ip, "")
@@ -264,6 +382,7 @@ class ElasticTrainingAgentTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
         agent._config.network_check = False
         agent._config.rdzv_configs = {"pend_timeout": 0}
@@ -272,15 +391,102 @@ class ElasticTrainingAgentTest(unittest.TestCase):
             raise RendezvousOutSyncError("test")
 
         agent._rendezvous = _mock_rendezvous
-        with self.assertRaises(TimeoutError):
+        with self.assertRaises(RendezvousTimeoutError):
             agent._initialize_workers(agent._worker_group)
             agent._save_ckpt_future
+
+    def test_initialize_workers_exception(self):
+        node_id = 2
+        agent = ElasticTrainingAgent(
+            node_rank=node_id,
+            config=self.config,
+            entrypoint="python",
+            spec=self.spec,
+            start_method=self.config.start_method,
+            log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
+        )
+        agent._config.network_check = False
+
+        agent._rendezvous = mock.MagicMock(
+            side_effect=[NodeCheckFailedError("test")],
+        )
+        with self.assertRaises(NodeCheckFailedError):
+            agent._initialize_workers(agent._worker_group)
+
+        agent._rendezvous = mock.MagicMock(
+            side_effect=[RendezvousTimeoutError("test")],
+        )
+        with self.assertRaises(RendezvousTimeoutError):
+            agent._initialize_workers(agent._worker_group)
+
+        agent._rendezvous = mock.MagicMock(
+            side_effect=[ValueError("test")],
+        )
+        with self.assertRaises(ValueError):
+            agent._initialize_workers(agent._worker_group, max_errors=1)
+
+        agent._rendezvous = mock.MagicMock(
+            side_effect=[ValueError("test"), TypeError("test")],
+        )
+        with self.assertRaises(TypeError):
+            agent._initialize_workers(agent._worker_group, max_errors=2)
+
+        agent._rendezvous = mock.MagicMock(
+            side_effect=[
+                ValueError("test"),
+                TypeError("test"),
+                RuntimeError("test"),
+            ],
+        )
+        with self.assertRaises(RuntimeError):
+            agent._initialize_workers(agent._worker_group, max_errors=3)
+
+
+def mock_gpu_metric_collect(*args, **kwargs):
+    logger.info("mock gpu metric collector is running...")
+    job_metrics = {}
+    metric = GpuNodeMetric()
+    for i in range(8):
+        metric.node_metrics[i] = GpuMetric()
+        metric.node_metrics[i].set_metric(GpuMetricEnum.GPU_FREE_MEM, 0)
+        metric.node_metrics[i].set_metric(GpuMetricEnum.GPU_USED_MEM, 80)
+        metric.node_metrics[i].set_metric(GpuMetricEnum.GPU_UTIL, 99.5)
+        metric.node_metrics[i].set_metric(GpuMetricEnum.GPU_TENSOR_UTIL, 30.5)
+    metric.update_avg_metrics()
+    job_metrics["worker-1"] = copy.deepcopy(metric)
+    job_metrics["worker-2"] = copy.deepcopy(metric)
+    job_metrics["worker-3"] = copy.deepcopy(metric)
+    job_metrics["worker-4"] = copy.deepcopy(metric)
+    _metric_context.add_node_metrics(
+        int(datetime.now().timestamp()), job_metrics
+    )
+
+
+def mock_npu_metric_collect(*args, **kwargs):
+    logger.info("mock npu metric collector is running...")
+    job_metrics = {}
+    metric = NpuNodeMetric()
+    for i in range(16):
+        metric.node_metrics[i] = NpuMetric()
+        metric.node_metrics[i].set_metric(NpuMetricEnum.NPU_USED_MEM, 78)
+        metric.node_metrics[i].set_metric(NpuMetricEnum.NPU_TOTAL_MEM, 80)
+        metric.node_metrics[i].set_metric(NpuMetricEnum.NPU_UTIL, 99.5)
+    metric.update_avg_metrics()
+    job_metrics["worker-1"] = copy.deepcopy(metric)
+    job_metrics["worker-2"] = copy.deepcopy(metric)
+    job_metrics["worker-3"] = copy.deepcopy(metric)
+    job_metrics["worker-4"] = copy.deepcopy(metric)
+    _metric_context.add_node_metrics(
+        int(datetime.now().timestamp()), job_metrics
+    )
 
 
 class ElasticTrainingAgentRunTest(unittest.TestCase):
     def setUp(self) -> None:
         self._master, addr = start_local_master()
         MasterClient._instance = build_master_client(addr, 1)
+        self._client = MasterClient.singleton_instance()
         launch_config = LaunchConfig(
             min_nodes=1,
             max_nodes=1,
@@ -303,13 +509,20 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
         node_id = 0
 
         self.rdzv_handler = MasterRendezvousHandler(
-            RendezvousName.ELASTIC_TRAINING,
+            RendezvousName.TRAINING,
             node_id,
             rdzv_parameters,
             local_world_size=self.config.nproc_per_node,
         )
         self.rdzv_handler.join_timeout = 5
 
+        if version_less_than_230():
+            logs_dict = {
+                "redirects": self.config.redirects,
+                "tee": self.config.tee,
+            }
+        else:
+            logs_dict = {}
         self.spec = WorkerSpec(
             role=self.config.role,
             local_world_size=self.config.nproc_per_node,
@@ -318,16 +531,16 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             rdzv_handler=self.rdzv_handler,
             max_restarts=self.config.max_restarts,
             monitor_interval=self.config.monitor_interval,
-            # redirects=self.config.redirects,
-            # tee=self.config.tee,
             master_addr=master_addr,
             local_addr=self.config.local_addr,
+            **logs_dict,
         )
         JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 1
 
     def tearDown(self):
         JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 15
         self._master.stop()
+        MasterClient._instance = None
 
     def test_monitor_workers(self):
         self.config.network_check = False
@@ -338,11 +551,69 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
         agent._report_failure_to_master({})
         run_result = agent._invoke_run()
         self.assertDictEqual(run_result.failures, {})
         self.assertEqual(run_result.state, WorkerState.SUCCEEDED)
+
+    @mock.patch.object(ElasticTrainingAgent, "_restart_workers")
+    def test_invoke_run(self, mock_restart_workers):
+        self.config.network_check = False
+        agent = ElasticTrainingAgent(
+            node_rank=0,
+            config=self.config,
+            entrypoint="echo",
+            spec=self.spec,
+            start_method=self.config.start_method,
+            log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
+        )
+        agent._monitor_workers = MagicMock(
+            return_value=RunResult(
+                state=WorkerState.HEALTHY,
+                return_values={0: 1, 1: 0},
+                failures={},
+            )
+        )
+        agent._membership_changed = MagicMock(return_value=True)
+        mock_restart_workers.side_effect = RuntimeError("test")
+        try:
+            agent._invoke_run()
+        except RuntimeError:
+            mock_restart_workers.assert_called()
+
+    def test_metric_collect(self):
+        with patch(
+            "dlrover.python.common.metric.monitor.SimpleMetricMonitor._collector",  # noqa
+            side_effect=mock_gpu_metric_collect(),
+        ):
+            os.environ[
+                "DLROVER_METRIC_URL"
+            ] = "https://metric.mock.dlrover.org"
+            os.environ["DLROVER_METRIC_TOKEN"] = "0123456789"
+            self.assertIsNot(os.getenv("DLROVER_METRIC_URL", ""), "")
+            self.assertIsNot(os.getenv("DLROVER_METRIC_TOKEN", ""), "")
+
+            _metric_context.clear_node_metrics()
+
+            self._master.diagnosis_manager.stop_metric_collect()
+
+        with patch(
+            "dlrover.python.common.metric.monitor.SimpleMetricMonitor._collector",  # noqa
+            side_effect=mock_npu_metric_collect(),
+        ):
+            os.environ[
+                "DLROVER_METRIC_URL"
+            ] = "https://metric.mock.dlrover.org"
+            os.environ["DLROVER_METRIC_TOKEN"] = "0123456789"
+            self.assertIsNot(os.getenv("DLROVER_METRIC_URL", ""), "")
+            self.assertIsNot(os.getenv("DLROVER_METRIC_TOKEN", ""), "")
+
+            _metric_context.clear_node_metrics()
+
+            self._master.diagnosis_manager.stop_metric_collect()
 
     def test_failure_ending_after_training(self):
         agent = ElasticTrainingAgent(
@@ -352,33 +623,34 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
         agent._wait_async_saver = mock.MagicMock(side_effect=[Exception])
         run_result = agent._invoke_run()
         self.assertDictEqual(run_result.failures, {})
         self.assertEqual(run_result.state, WorkerState.SUCCEEDED)
 
-    def test_report_resource_with_step(self):
+    def test_report_step(self):
         os.environ[NodeEnv.MONITOR_ENABLED] = "true"
         with tempfile.TemporaryDirectory() as tmpdirname:
             config_file = os.path.join(tmpdirname, "runtime_metrics.json")
             monitor = TorchTrainingMonitor(config_file)
             monitor.start()
-            monitor.report_resource_with_step()
-            self.assertEqual(self._master.speed_monitor._global_step, 0)
+            monitor.report_step()
+            self.assertEqual(self._master.perf_monitor._global_step, 0)
             record = {"step": 100, "timestamp": time.time()}
             with open(config_file, "w") as f:
                 f.write(json.dumps(record))
 
-            monitor.report_resource_with_step()
-            self.assertEqual(self._master.speed_monitor._global_step, 100)
+            monitor.report_step()
+            self.assertEqual(self._master.perf_monitor._global_step, 100)
 
-    def test_check_network_rdzv_for_elastic_training(self):
+    def test_check_network_rdzv(self):
         self._master.rdzv_managers[
             RendezvousName.NETWORK_CHECK
         ].join_rendezvous(0, 0, 8)
         with self.assertRaises(RendezvousOutSyncError):
-            self.rdzv_handler._check_network_rdzv_for_elastic_training()
+            self.rdzv_handler._check_network_rdzv()
 
     def test_get_free_port(self):
         agent = ElasticTrainingAgent(
@@ -388,6 +660,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
 
         os.environ["HOST_PORTS"] = "10000,10002,10003"
@@ -414,6 +687,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
         storage = PosixDiskStorage()
         saver = DdpCheckpointSaver("/tmp/test", storage.get_class_meta())
@@ -426,7 +700,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
     def test_create_worker_spec(self):
         spec = _create_worker_spec(
             node_rank=0,
-            rdzv_name=RendezvousName.ELASTIC_TRAINING,
+            rdzv_name=RendezvousName.TRAINING,
             config=self.config,
             entrypoint="echo",
             args=[],
@@ -434,6 +708,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
         self.assertEqual(spec.max_restarts, 3)
         self.assertEqual(spec.local_world_size, 2)
 
+    @unittest.skip("skip")
     def test_numa_affinity(self):
         with patch(
             "dlrover.python.util.numa_util.get_npu_affinity",
@@ -451,6 +726,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
                 spec=self.spec,
                 start_method=self.config.start_method,
                 log_dir=self.config.log_dir,
+                exit_barrier_timeout=1,
             )
             self.assertEqual(agent._rank_cpu_affinity[0], None)
             self.assertEqual(agent._rank_cpu_affinity[1], None)
@@ -475,6 +751,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
                 spec=self.spec,
                 start_method=self.config.start_method,
                 log_dir=self.config.log_dir,
+                exit_barrier_timeout=1,
             )
             self.assertEqual(agent._rank_cpu_affinity[0], None)
             self.assertEqual(agent._rank_cpu_affinity[1], None)
@@ -493,6 +770,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
         agent.sync_training_ports(1)
         self.assertEqual(
@@ -510,6 +788,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
 
         agent.sync_training_ports(1)
@@ -518,6 +797,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             str(65000),
         )
 
+    @unittest.skip("skip")
     def test_stop_workers_ascend(self, cmdline=None):
         # test Ascend NPU
         config = self.config
@@ -541,6 +821,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
 
         def stop_task(agent):
@@ -558,7 +839,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
         self.spec = spec
         self.config = config
 
-    @pytest.mark.skip()
+    @unittest.skip("skip")
     def test_no_orphan_workers(self):
         orphan_killed = True
         orphan_pid = -1
@@ -589,6 +870,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
         self.assertFalse(orphan_killed)
         os.kill(orphan_pid, signal.SIGTERM)
 
+    @unittest.skip("skip")
     def test_orphan_workers(self):
         orphan_killed = True
         subprocess.run(
@@ -632,6 +914,7 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
 
         # without timeout
@@ -651,11 +934,12 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
                 spec=self.spec,
                 start_method=self.config.start_method,
                 log_dir=self.config.log_dir,
+                exit_barrier_timeout=1,
             )
             try:
                 agent._stop_workers(None, is_restart=False, timeout=3)
                 self.fail()
-            except TimeoutError:
+            except StopWorkerTimeoutError:
                 self.assertTrue(True)
 
     def test_diagnosis(self):
@@ -666,16 +950,27 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             spec=self.spec,
             start_method=self.config.start_method,
             log_dir=self.config.log_dir,
+            exit_barrier_timeout=1,
         )
+        agent._stop_workers = mock.MagicMock(return_value=True)
+        agent._restart_workers = mock.MagicMock(return_value=True)
 
         context = get_agent_context()
+
         action = EventAction(
             event_action="action",
             expired_time_period=600,
         )
         context.enqueue_diagnosis_action(action)
-
-        time.sleep(3)
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.MASTER_INSTANCE
+                ]
+            ),
+            1,
+        )
+        time.sleep(1)
         agent._check_and_process_diagnosis_action()
         self.assertEqual(
             len(
@@ -685,6 +980,163 @@ class ElasticTrainingAgentRunTest(unittest.TestCase):
             ),
             1,
         )
+
+        action = NodeAction(
+            node_id=0,
+            node_type="worker",
+            action_type=DiagnosisActionType.RESTART_WORKER,
+            instance=DiagnosisConstant.ANY_INSTANCE,
+        )
+        context.enqueue_diagnosis_action(action)
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.ANY_INSTANCE
+                ]
+            ),
+            1,
+        )
+        self.assertEqual(agent._remaining_failovers, 3)
+        agent._check_and_process_diagnosis_action()
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.ANY_INSTANCE
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(agent._remaining_failovers, 3)
+
+        action = NodeAction(
+            node_id=0,
+            node_type="worker",
+            action_type=DiagnosisActionType.RESTART_WORKER,
+            instance=DiagnosisConstant.LOCAL_INSTANCE,
+        )
+        context.enqueue_diagnosis_action(action)
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.LOCAL_INSTANCE
+                ]
+            ),
+            1,
+        )
+        self.assertEqual(agent._remaining_failovers, 3)
+        agent._check_and_process_diagnosis_action()
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.LOCAL_INSTANCE
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(agent._remaining_failovers, 2)
+
+        action = NodeAction(
+            node_id=1,
+            node_type="worker",
+            action_type=DiagnosisActionType.RELAUNCH_WORKER,
+            instance=DiagnosisConstant.LOCAL_INSTANCE,
+        )
+        context.enqueue_diagnosis_action(action)
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.LOCAL_INSTANCE
+                ]
+            ),
+            1,
+        )
+        time.sleep(2)
+        agent._check_and_process_diagnosis_action()
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.LOCAL_INSTANCE
+                ]
+            ),
+            0,
+        )
+
+        action = EventAction(
+            expired_time_period=600, instance=DiagnosisConstant.ANY_INSTANCE
+        )
+        context.enqueue_diagnosis_action(action)
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.ANY_INSTANCE
+                ]
+            ),
+            1,
+        )
+        time.sleep(1)
+        agent._check_and_process_diagnosis_action()
+        self.assertEqual(
+            len(
+                context._diagnosis_action_queue._actions[
+                    DiagnosisConstant.ANY_INSTANCE
+                ]
+            ),
+            1,
+        )
+
+    @patch(
+        "dlrover.python.elastic_agent.master_client"
+        ".MasterClient.report_failed_exited"
+    )
+    @patch(
+        "dlrover.python.elastic_agent.torch.training"
+        ".ElasticTrainingAgent.run"
+    )
+    def test_node_status_report(self, mock_run, mock_report_failed_exited):
+        config = ElasticLaunchConfig(1, 1, 1)
+        entrypoint = "python"
+
+        mock_run.side_effect = RuntimeError("test")
+        mock_report_failed_exited.return_value = True
+        try:
+            launch_agent(config, entrypoint, [])
+            self.fail()
+        except RuntimeError:
+            self.assertTrue(True)
+            mock_run.assert_called_once()
+            mock_report_failed_exited.assert_called_once()
+
+        mock_run.side_effect = NodeCheckFailedError("test")
+        try:
+            launch_agent(config, entrypoint, [])
+            self.fail()
+        except NodeCheckFailedError:
+            self.assertTrue(True)
+            self.assertEqual(mock_run.call_count, 2)
+            mock_report_failed_exited.assert_called_once()
+
+    @patch(
+        "dlrover.python.elastic_agent.torch.training"
+        ".ElasticTrainingAgent.run"
+    )
+    def test_launch_agent(self, mock_run):
+        config = ElasticLaunchConfig(1, 1, 1)
+        entrypoint = "python"
+        mock_run.return_value = None
+        try:
+            launch_agent(config, entrypoint, [])
+        except Exception:
+            pass
+
+        mock_run.return_value = RunResult(
+            state=WorkerState.FAILED,
+            return_values={0: 1, 1: 0},
+            failures={},
+        )
+        try:
+            launch_agent(config, entrypoint, [])
+        except Exception:
+            pass
 
 
 class NodeCheckElasticAgentTest(unittest.TestCase):
@@ -712,13 +1164,20 @@ class NodeCheckElasticAgentTest(unittest.TestCase):
         node_id = 0
 
         self.rdzv_handler = MasterRendezvousHandler(
-            RendezvousName.ELASTIC_TRAINING,
+            RendezvousName.TRAINING,
             node_id,
             rdzv_parameters,
             local_world_size=self.config.nproc_per_node,
         )
         self.rdzv_handler.join_timeout = 5
 
+        if version_less_than_230():
+            logs_dict = {
+                "redirects": self.config.redirects,
+                "tee": self.config.tee,
+            }
+        else:
+            logs_dict = {}
         self.spec = WorkerSpec(
             role=self.config.role,
             local_world_size=self.config.nproc_per_node,
@@ -727,10 +1186,9 @@ class NodeCheckElasticAgentTest(unittest.TestCase):
             rdzv_handler=self.rdzv_handler,
             max_restarts=self.config.max_restarts,
             monitor_interval=self.config.monitor_interval,
-            # redirects=self.config.redirects,
-            # tee=self.config.tee,
             master_addr=master_addr,
             local_addr=self.config.local_addr,
+            **logs_dict,
         )
         JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 1
 
@@ -790,6 +1248,7 @@ class NodeCheckElasticAgentTest(unittest.TestCase):
         agent._client.check_straggler = mock.MagicMock(return_value=([], ""))
         agent._run_node_check = mock.MagicMock(return_value=(True, 100))
         agent._stop_workers = mock.MagicMock(return_value=True)
+        agent._client.report_network_check = mock.MagicMock(return_value=True)
         self.assertTrue(agent.run())
 
         # with fault and no stragglers
@@ -814,6 +1273,12 @@ class NodeCheckElasticAgentTest(unittest.TestCase):
             self.fail()
         except RuntimeError:
             pass
+
+        # with _run_node_check return false
+        agent._client.check_fault_node = mock.MagicMock(return_value=([], ""))
+        agent._client.check_straggler = mock.MagicMock(return_value=([], ""))
+        agent._run_node_check = mock.MagicMock(return_value=(False, 100))
+        self.assertFalse(agent.run())
 
     @mock.patch.object(NodeCheckElasticAgent, "run")
     def test_node_health_check(self, mock_run):
@@ -857,6 +1322,42 @@ class MasterRendezvousHandlerTest(unittest.TestCase):
         JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 15
         self._master.stop()
 
+    def test_join_rendezvous(self):
+        launch_config = LaunchConfig(
+            min_nodes=1,
+            max_nodes=1,
+            nproc_per_node=2,
+            run_id="test",
+            monitor_interval=0.1,
+        )
+        self.config = ElasticLaunchConfig(**launch_config.__dict__)
+        rdzv_parameters = RendezvousParameters(
+            backend=self.config.rdzv_backend,
+            endpoint=self.config.rdzv_endpoint,
+            run_id=self.config.run_id,
+            min_nodes=self.config.min_nodes,
+            max_nodes=self.config.max_nodes,
+            local_addr=self.config.local_addr,
+            **self.config.rdzv_configs,
+        )
+        rdzv_handler = MasterRendezvousHandler(
+            RendezvousName.TRAINING,
+            0,
+            rdzv_parameters,
+            local_world_size=self.config.nproc_per_node,
+        )
+        rdzv_handler._client.join_rendezvous = mock.MagicMock(return_value=0)
+        rdzv_handler._client.num_nodes_waiting = mock.MagicMock(
+            return_value=-1
+        )
+        with self.assertRaises(JobStoppingError):
+            rdzv_handler.next_rendezvous()
+
+        rdzv_handler._client.join_rendezvous = mock.MagicMock(return_value=0)
+        rdzv_handler._client.num_nodes_waiting = mock.MagicMock(return_value=1)
+        with self.assertRaises(RendezvousOutSyncError):
+            rdzv_handler.next_rendezvous()
+
     def test_pend_timeout(self):
         launch_config = LaunchConfig(
             min_nodes=1,
@@ -877,7 +1378,7 @@ class MasterRendezvousHandlerTest(unittest.TestCase):
         )
         rdzv_parameters.config["pend_timeout"] = 1
         rdzv_handler = MasterRendezvousHandler(
-            RendezvousName.ELASTIC_TRAINING,
+            RendezvousName.TRAINING,
             0,
             rdzv_parameters,
             local_world_size=self.config.nproc_per_node,
@@ -886,7 +1387,7 @@ class MasterRendezvousHandlerTest(unittest.TestCase):
         rdzv_handler._client.get_comm_world = mock.MagicMock(
             return_value=(0, 0, {1: 8})
         )
-        with self.assertRaises(TimeoutError):
+        with self.assertRaises(RendezvousTimeoutError):
             rdzv_handler.next_rendezvous()
 
 

@@ -1,5 +1,4 @@
-# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
-# Copyright 2022 The DLRover Authors. All rights reserved.
+# Copyright 2025 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -27,6 +26,12 @@ class PlatformType(object):
     RAY = "ray"
     PY_KUBERNETES = "pyk8s"
     LOCAL = "local"
+
+
+class CommunicationType(object):
+    COMM_SERVICE_GRPC = "grpc"
+    COMM_SERVICE_HTTP = "http"
+    COMM_SERVICE_RAY = "ray"
 
 
 class ElasticJobApi(object):
@@ -82,6 +87,17 @@ class NodeStatus(object):
     DELETED = "Deleted"
     UNKNOWN = "Unknown"
 
+    @classmethod
+    def is_terminal_status(cls, status):
+        if status in [
+            NodeStatus.FAILED,
+            NodeStatus.DELETED,
+            NodeStatus.FINISHED,
+            NodeStatus.SUCCEEDED,
+        ]:
+            return True
+        return False
+
 
 class NodeEventType(object):
     """Notice: the type here is equal to the pod event type by k8s"""
@@ -95,6 +111,14 @@ class NodeEventType(object):
     FAILED_EXITED = "FAILED_EXITED"
     NODE_CHECK_SUCCEEDED = "NODE_CHECK_SUCCEEDED"
     NODE_CHECK_FAILED = "NODE_CHECK_FAILED"
+    MASTER_CONNECTION_FAILED = "MASTER_CONNECTION_FAILED"
+    WAIT_PRE_CHECK = "WAIT_PRE_CHECK"
+
+
+class PendingTimeoutStrategyType(object):
+    SKIP = 0
+    NECESSARY = 1
+    ALL = 2
 
 
 class GpuMetricEnum(object):
@@ -129,12 +153,22 @@ class NpuMetricEnum(object):
 
 
 class NodeExitReason(object):
+    Succeeded = "Succeeded"
     KILLED = "Deleted"
     OOM = "OOMKilled"
     FATAL_ERROR = "Error"
     UNKNOWN_ERROR = "UnknownError"
     HARDWARE_ERROR = "HardwareError"
     NO_HEARTBEAT = "NoHeartBeat"
+    DIAG_FAIL = "DiagnosticFailure"
+    RELAUNCHED = "Relaunched"
+
+
+class NodeExitDescription(object):
+    CHECK_FAILED_MSG = (
+        "This node failed the node-check "
+        "procedure(mat-mul + comm) before training."
+    )
 
 
 class JobExitReason(object):
@@ -249,6 +283,7 @@ class TrainingLoopStatus(object):
 class NodeEnv(object):
     RELAUNCHED_POD = "RELAUNCHED_POD"
     DLROVER_MASTER_ADDR = "DLROVER_MASTER_ADDR"
+    DLROVER_MASTER_SERVICE_TYPE = "DLROVER_MASTER_SERVICE_TYPE"
     GRPC_ENABLE_FORK = "GRPC_ENABLE_FORK_SUPPORT"
     GRPC_POLL_STRATEGY = "GRPC_POLL_STRATEGY"
     POD_NAME = "POD_NAME"
@@ -315,13 +350,8 @@ class k8sAPIExceptionReason(object):
 
 
 class RendezvousName(object):
-    ELASTIC_TRAINING = "elastic-training"
+    TRAINING = "elastic-training"
     NETWORK_CHECK = "network-check"
-
-
-class NodeErrorMessage(object):
-    NETWORKER_ERROR = "Network is breakdown"
-    SOCKET_GAIERROR = "Name or service not known"
 
 
 class NetworkFailureReason(object):
@@ -360,6 +390,10 @@ class JobConstant(object):
     INSUFFICIENT_NODE_TIMEOUT_DEFAULT_MAX = 3600
     PENDING_NODE_TIMEOUT_DEFAULT_MIN = 600
     NODE_CHECK_TIMEOUT = 300
+    SUCCEEDED_POD_TERMINATING_TIMEOUT = 1200
+
+    # timeout 60s
+    MASTER_CLIENT_DEFAULT_TIMEOUT = 60
 
     # grpc timeout 60s
     MASTER_CLIENT_GRPC_DEFAULT_TIMEOUT = 60
@@ -377,12 +411,23 @@ class JobConstant(object):
     # sleep 5s before next node check round
     NODE_CHECK_NEXT_ROUND_TIMEOUT = 5
 
+    # default interval seconds for loop in training agent
     TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 15
+
+    # sleep 5s before next rendezvous round
+    RENDEZVOUS_DEFAULT_INTERVAL = 5
+
+    # sleep 5s before next port synchronization
+    SYNC_PORTS_DEFAULT_INTERVAL = 5
+
+    # interval seconds for pre-check waiting
+    PRE_CHECK_WAIT_SECS = 10
 
 
 class Accelerators(object):
     NVIDIA_GPU = "nvidia.com/gpu"
     ASCEND_NPU = "ascend-npu"
+    GENERIC_CPU = "cpu"
 
 
 class AscendConstants(object):
@@ -394,14 +439,21 @@ class AscendConstants(object):
     HCCL_PORT_START_DEFAULT = 64000
 
 
-class ErrorMonitorConstants(object):
+class EventReportConstants(object):
     TYPE_INFO = "info"
     TYPE_WARN = "warn"
     TYPE_ERROR = "error"
 
     JOB_INSTANCE = "job"
 
+    ACTION_MASTER_START = "master_start"
+    ACTION_MASTER_END = "master_end"
+    ACTION_JOB_START = "job_start"
+    ACTION_JOB_SUCCESS = "job_success"
+    ACTION_JOB_FAIL = "job_fail"
     ACTION_WORKER_CREATE = "worker_create"
+    ACTION_WORKER_PENDING = "worker_pending"
+    ACTION_WORKER_NO_HEARTBEAT = "worker_no_heartbeat"
     ACTION_STATUS_UPDATE = "status_update"
     ACTION_EARLY_STOP = "early_stop"
     ACTION_STOP = "stop"
@@ -421,3 +473,41 @@ class ErrorMonitorConstants(object):
     ACTION_RESUME_MEM_CKPT_START = "resume_mem_ckpt_start"
     ACTION_RESUME_MEM_CKPT_COMPLETE = "resume_mem_ckpt_complete"
     ACTION_HANG_WARN = "hang_warning"
+
+    ACTION_PRE_CHECK_DISABLE = "pre_check_disable"
+    ACTION_PRE_CHECK_TIMEOUT = "pre_check_timeout"
+    ACTION_PRE_CHECK_ERROR = "pre_check_error"
+    ACTION_PRE_CHECK_PASS = "pre_check_pass"
+    ACTION_PRE_CHECK_FAIL = "pre_check_fail"
+
+
+class PreCheckStatus(object):
+    CHECKING = "CHECKING"
+    FAIL = "FAIL"
+    PASS = "PASS"
+    DISABLED = "DISABLED"
+
+
+class DictKey(object):
+    """
+    Presents the keys in dictionary
+    """
+
+    # the key of logs
+    LOGS = "logs"
+
+
+class JobStage(object):
+    JOB_INIT = "init"
+    JOB_RUNNING = "running"
+    JOB_STOPPING = "stopping"
+    JOB_STOPPED = "stopped"
+    JOB_SUSPENDED = "suspended"
+
+
+class KeyValueOps(object):
+    ADD = "add"
+    APPEND = "append"
+    GET = "get"
+    SET = "set"
+    DELETE = "delete"

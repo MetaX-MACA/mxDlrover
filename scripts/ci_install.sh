@@ -15,10 +15,23 @@
 echo "Start installing CI python packages."
 start_time=$(date +%s)
 
+echo "Upgrading pip tools"
+pip install --upgrade pip
 pip install -q kubernetes
 pip install -q grpcio-tools==1.58
 pip install -q psutil
 pip install -q deprecated
+pip install -q tornado
+pip install -q pytest-forked
+
+if [ "$1" = "basic" ]; then
+  echo ""
+  end_time=$(date +%s)
+  cost_time=$((end_time-start_time))
+  echo "'Basic' dependencies only, cost time: $((cost_time/60))min $((cost_time%60))s"
+  exit 0
+fi
+
 pip install -q 'ray[default]'
 pip install -q pyhocon
 pip install -q pytest-cov
@@ -30,7 +43,9 @@ pip install -q deepspeed==0.12.6
 pip install -q accelerate==0.29.2
 pip install -q transformers==4.37.2
 pip install -q peft==0.10.0
+pip install -q omegaconf
+pip install -q tensordict cloudpickle --no-deps
 
 end_time=$(date +%s)
 cost_time=$((end_time-start_time))
-echo "pip cost time: $((cost_time/60))min $((cost_time%60))s"
+echo "All dependencies cost time: $((cost_time/60))min $((cost_time%60))s"

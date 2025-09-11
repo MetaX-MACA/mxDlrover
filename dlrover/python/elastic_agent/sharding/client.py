@@ -18,7 +18,7 @@ from collections import OrderedDict
 from multiprocessing import SimpleQueue
 
 from dlrover.proto import elastic_training_pb2
-from dlrover.python.common import grpc
+from dlrover.python.common import comm
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.elastic_agent.master_client import MasterClient
 from dlrover.python.elastic_agent.monitor.training import TFTrainingReporter
@@ -186,9 +186,7 @@ class ShardingClient(object):
 
     def _report_training_local_step(self):
         if not self._training_reporter.called_in_tf_hook:
-            self._training_reporter.report_resource_with_step(
-                self._batch_count
-            )
+            self._training_reporter.report_step(self._batch_count)
 
     def fetch_shard(self):
         """Fetch data shard and each shard contains the name,
@@ -223,7 +221,7 @@ class ShardingClient(object):
         return shard_checkpoint
 
     def restore_shard_from_checkpoint(self, shard_checkpoint):
-        message = grpc.ShardCheckpoint(shard_checkpoint)
+        message = comm.ShardCheckpoint(shard_checkpoint)
         res = self._mc.report_shard_checkpoint(message)
         return res.success
 

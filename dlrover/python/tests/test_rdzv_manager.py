@@ -17,6 +17,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import dlrover.python.util.store_util as store_util
 from dlrover.python.common.constants import NetworkFailureReason
 from dlrover.python.common.node import Node
 from dlrover.python.elastic_agent.master_client import (
@@ -24,6 +25,9 @@ from dlrover.python.elastic_agent.master_client import (
     build_master_client,
 )
 from dlrover.python.elastic_agent.torch.master_kv_store import MasterKVStore
+from dlrover.python.master.elastic_training.kv_store_service import (
+    KVStoreService,
+)
 from dlrover.python.master.elastic_training.net_topology import (
     NodeTopologyMeta,
 )
@@ -31,7 +35,6 @@ from dlrover.python.master.elastic_training.rdzv_manager import (
     ElasticTrainingRendezvousManager,
     NetworkCheckRendezvousManager,
 )
-from dlrover.python.master.monitor.error_monitor import SimpleErrorMonitor
 from dlrover.python.tests.test_utils import start_local_master
 
 
@@ -43,22 +46,70 @@ class MasterKVStoreTest(unittest.TestCase):
     def tearDown(self):
         self._master.stop()
 
+    def test_kv_store_service(self):
+        kv_store = KVStoreService()
+        kv_store.set("key0", 1)
+        self.assertEqual(kv_store.get("key0"), 1)
+        self.assertEqual(kv_store.get("key1"), b"")
+        kv_store.add("key1", 2)
+        self.assertEqual(kv_store.get("key1"), 2)
+        kv_store.add("key1", 3)
+        self.assertEqual(kv_store.get("key1"), 5)
+        kv_store.clear()
+        self.assertEqual(kv_store.get("key0"), b"")
+        self.assertEqual(kv_store.get("key1"), b"")
+
     def test_kv_store_api(self):
         kv_store = MasterKVStore("dlrover/torch/test")
+        kv_store.set_timeout(datetime.timedelta(seconds=0.5))
+
         key = "key0"
+        kv_store.set(key, 1)
+        self.assertEqual(kv_store.get(key), 1)
+
         kv_store.set(key, "1".encode())
         value = kv_store.get(key)
+        self.assertEqual(value.decode(), "1")
+        self.assertEqual(value, b"1")
         self.assertEqual(int(value), 1)
-        kv_store.add(key, 2)
+
+        kv_store.set(key, "abc".encode())
         value = kv_store.get(key)
-        self.assertEqual(int(value), 3)
+        self.assertEqual(value, b"abc")
+        self.assertEqual(value.decode(), "abc")
+
+        with self.assertRaises(LookupError):
+            kv_store.get("dummy")
+
+        key = "key1"
+        kv_store.add(key, 2)
+        self.assertEqual(kv_store.get(key), 2)
+        kv_store.add(key, 3)
+        self.assertEqual(kv_store.get(key), 5)
+
         kv_store.wait([key])
-        try:
+        with self.assertRaises(LookupError):
             kv_store.wait(
-                ["aa"], override_timeout=datetime.timedelta(seconds=0.01)
+                ["aa"], override_timeout=datetime.timedelta(seconds=0.5)
             )
-        except Exception as e:
-            self.assertIsInstance(e, LookupError)
+
+        self.assertEqual(kv_store.check([key]), True)
+        self.assertEqual(kv_store.check("foo"), False)
+
+        kv_store.add("key2", 100)
+        kv_store.add("key3", 200)
+        self.assertEqual(kv_store.multi_get(["key2", "key3"]), [100, 200])
+
+        with self.assertRaises(LookupError):
+            kv_store.multi_get(["key2", "key3", "key4"])
+
+        kv_store.multi_set(["foo", "bar"], ["foo1", "bar1"])
+        self.assertEqual(kv_store.multi_get(["foo", "bar"]), ["foo1", "bar1"])
+        self.assertEqual(kv_store.get("foo"), "foo1")
+        self.assertEqual(kv_store.get("bar"), "bar1")
+
+        with self.assertRaises(IndexError):
+            kv_store.multi_set(["foo", "bar"], ["foo1"])
 
     def test_kv_store_timeout(self):
         kv_store = MasterKVStore("dlrover/torch/test")
@@ -68,6 +119,8 @@ class MasterKVStoreTest(unittest.TestCase):
         kv_store.set(key1, "1".encode())
         kv_store.set(key2, "2".encode())
         kv_store.wait([key1, key2])
+        self.assertEqual("1".encode(), kv_store.get(key1))
+        self.assertEqual("2".encode(), kv_store.get(key2))
 
         kv_store.set_timeout(datetime.timedelta(seconds=1))
         try:
@@ -80,14 +133,67 @@ class MasterKVStoreTest(unittest.TestCase):
         except Exception as e:
             self.assertIsInstance(e, LookupError)
 
+    def test_store_util(self):
+        store = MasterKVStore("dlrover/torch/test1")
+        store.set_timeout(datetime.timedelta(seconds=1))
+        key_prefix = "test"
+
+        try:
+            store_util.barrier(store, 2, key_prefix, 1)
+        except Exception as e:
+            self.assertIsInstance(e, LookupError)
+        store_util.barrier(store, 2, key_prefix, 1)
+
+        store = MasterKVStore("dlrover/torch/test2")
+        store.set_timeout(datetime.timedelta(seconds=1))
+        key_prefix = "test"
+
+        key = store_util._barrier_nonblocking(store, 2, key_prefix)
+        try:
+            store.get(key)
+        except Exception as e:
+            self.assertIsInstance(e, LookupError)
+        key = store_util._barrier_nonblocking(store, 2, key_prefix)
+        self.assertEqual("<val_ignored>", store.get(key))
+
 
 class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
+    def test_rdzv_timeout(self):
+        rdzv_manager = ElasticTrainingRendezvousManager()
+        rdzv_manager.update_rdzv_params(3, 3, 0.5, 1)
+        rdzv_round = rdzv_manager.get_rdzv_round()
+        self.assertEqual(rdzv_round, 0)
+        self.assertEqual(rdzv_manager.rendezvous_events, {})
+        rdzv_manager._alive_nodes = [0, 1, 2]
+        rdzv_manager.join_rendezvous(0, 0, 8)
+        rdzv_manager.join_rendezvous(1, 1, 8)
+        time.sleep(1)
+        round, _, world = rdzv_manager.get_comm_world(0)
+        self.assertEqual(round, 0)
+        self.assertDictEqual(world, {})
+        self.assertEqual(len(rdzv_manager._waiting_nodes), 2)
+        self.assertEqual(len(rdzv_manager._rdzv_nodes), 0)
+
+        rdzv_manager = NetworkCheckRendezvousManager()
+        rdzv_manager.update_rdzv_params(2, 2, 0.5, 1)
+        rdzv_round = rdzv_manager.get_rdzv_round()
+        self.assertEqual(rdzv_round, 0)
+        self.assertEqual(rdzv_manager.rendezvous_events, {})
+        rdzv_manager._alive_nodes = [0, 1]
+        rdzv_manager.join_rendezvous(0, 0, 8)
+        time.sleep(1)
+        round, _, world = rdzv_manager.get_comm_world(0)
+        self.assertEqual(round, 0)
+        self.assertDictEqual(world, {})
+        self.assertEqual(len(rdzv_manager._waiting_nodes), 1)
+        self.assertEqual(len(rdzv_manager._rdzv_nodes), 0)
+
     def test_max_nodes(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
+        rdzv_manager = ElasticTrainingRendezvousManager()
         rdzv_manager.update_rdzv_params(3, 3, 60, 1)
         rdzv_round = rdzv_manager.get_rdzv_round()
         self.assertEqual(rdzv_round, 0)
+        self.assertEqual(rdzv_manager.rendezvous_events, {})
         rdzv_manager._alive_nodes = [0, 1, 2]
         rdzv_manager.join_rendezvous(0, 0, 8)
         rdzv_manager.join_rendezvous(1, 1, 8)
@@ -96,20 +202,21 @@ class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
         self.assertDictEqual(world, {})
         self.assertEqual(len(rdzv_manager._waiting_nodes), 2)
         self.assertEqual(len(rdzv_manager._rdzv_nodes), 0)
+        self.assertEqual(list(rdzv_manager.rendezvous_events.keys()), [0])
         rdzv_manager.join_rendezvous(2, 2, 8)
-        self.assertDictEqual(
-            rdzv_manager._node_rdzv_times, {0: 0.0, 1: 0.0, 2: 0.0}
-        )
+        self.assertListEqual(list(rdzv_manager._node_rdzv_times), [0, 1, 2])
+        for key in rdzv_manager._node_rdzv_times:
+            self.assertLessEqual(rdzv_manager._node_rdzv_times[key], 0.05)
         round, _, world = rdzv_manager.get_comm_world(0)
         self.assertDictEqual(rdzv_manager._node_rdzv_times, {})
         self.assertEqual(round, 1)
         self.assertEqual(len(rdzv_manager._waiting_nodes), 0)
         self.assertEqual(len(rdzv_manager._rdzv_nodes), 3)
         self.assertListEqual(list(world.keys()), [0, 1, 2])
+        self.assertEqual(list(rdzv_manager.rendezvous_events.keys()), [0])
 
     def test_min_nodes(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
+        rdzv_manager = ElasticTrainingRendezvousManager()
         rdzv_manager.update_rdzv_params(2, 3, 0.1, 1)
         node_1 = Node("worker", 1)
         rdzv_manager.add_alive_node(node_1)
@@ -131,8 +238,7 @@ class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
         self.assertListEqual(list(world.keys()), [0, 1])
 
     def test_min_nodes_with_unit(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
+        rdzv_manager = ElasticTrainingRendezvousManager()
         min_nodes = 8
         max_nodes = 12
         node_unit = 4
@@ -189,8 +295,7 @@ class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
         self.assertEqual(num, 0)
 
     def test_get_lacking_ranks(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
+        rdzv_manager = ElasticTrainingRendezvousManager()
 
         rdzv_manager._rdzv_params.min_nodes = 4
         rdzv_manager._rdzv_params.max_nodes = 4
@@ -214,8 +319,7 @@ class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
         self.assertEqual(rdzv_manager._get_lacking_ranks(), [])
 
     def test_multi_updating_waiting_nodes(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
+        rdzv_manager = ElasticTrainingRendezvousManager()
 
         join_num = 1000
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -260,13 +364,14 @@ class ElasticTrainingRendezvousManagerTest(unittest.TestCase):
 
 class NetworkCheckRendezvousManagerTest(unittest.TestCase):
     def test_network_check_rdzv(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = NetworkCheckRendezvousManager(error_monitor)
+        rdzv_manager = NetworkCheckRendezvousManager()
         rdzv_manager.update_rdzv_params(4, 4, 60, 1)
         rdzv_manager._alive_nodes = [0, 1, 2, 3]
+        self.assertEqual(rdzv_manager.rendezvous_events, {})
         for i in range(4):
             round = rdzv_manager.join_rendezvous(i, i, 8)
         self.assertEqual(round, 0)
+        self.assertEqual(list(rdzv_manager.rendezvous_events.keys()), [0])
         round, group, world = rdzv_manager.get_comm_world(0)
         self.assertEqual(round, 1)
         self.assertEqual(group, 0)
@@ -310,8 +415,7 @@ class NetworkCheckRendezvousManagerTest(unittest.TestCase):
         self.assertListEqual(nodes, [])
 
     def test_network_check_rdzv_with_single_node(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = NetworkCheckRendezvousManager(error_monitor)
+        rdzv_manager = NetworkCheckRendezvousManager()
         rdzv_manager.update_rdzv_params(1, 1, 60, 1)
         rdzv_manager._alive_nodes = [0]
         round = rdzv_manager.join_rendezvous(0, 0, 8)
@@ -327,8 +431,7 @@ class NetworkCheckRendezvousManagerTest(unittest.TestCase):
         self.assertDictEqual(rdzv_manager._node_status, {})
 
     def test_network_check_straggler_even_nodes(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = NetworkCheckRendezvousManager(error_monitor)
+        rdzv_manager = NetworkCheckRendezvousManager()
         rdzv_manager.update_rdzv_params(6, 6, 60, 1)
         rdzv_manager._alive_nodes = [0, 1, 2, 3, 4, 5]
         for i in range(6):
@@ -363,8 +466,7 @@ class NetworkCheckRendezvousManagerTest(unittest.TestCase):
         self.assertListEqual(stragglers, [5])
 
     def test_network_check_straggler_old_nodes(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = NetworkCheckRendezvousManager(error_monitor)
+        rdzv_manager = NetworkCheckRendezvousManager()
         rdzv_manager.update_rdzv_params(5, 5, 60, 1)
         rdzv_manager._alive_nodes = [0, 1, 2, 3, 4]
         for i in range(5):
@@ -399,8 +501,7 @@ class NetworkCheckRendezvousManagerTest(unittest.TestCase):
         self.assertListEqual(stragglers, [1])
 
     def test_sync_ckpt_nodes(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
+        rdzv_manager = ElasticTrainingRendezvousManager()
         rdzv_manager._latest_rdzv_nodes = [0, 1]
         success = rdzv_manager.sync_ckpt_nodes(0, 100)
         self.assertFalse(success)
@@ -410,8 +511,7 @@ class NetworkCheckRendezvousManagerTest(unittest.TestCase):
         self.assertFalse(success)
 
     def test_map_node_rank_to_id(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = ElasticTrainingRendezvousManager(error_monitor)
+        rdzv_manager = ElasticTrainingRendezvousManager()
         rdzv_manager._rdzv_nodes[0] = NodeTopologyMeta(
             node_id=1,
             node_rank=0,
@@ -422,8 +522,7 @@ class NetworkCheckRendezvousManagerTest(unittest.TestCase):
         self.assertDictEqual(id_d, {1: True})
 
     def test_when_node_not_init(self):
-        error_monitor = SimpleErrorMonitor()
-        rdzv_manager = NetworkCheckRendezvousManager(error_monitor)
+        rdzv_manager = NetworkCheckRendezvousManager()
         self.assertTrue(not rdzv_manager._rdzv_nodes)
 
         rdzv_manager.check_fault_node()

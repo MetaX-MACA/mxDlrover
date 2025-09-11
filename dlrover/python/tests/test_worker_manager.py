@@ -19,6 +19,7 @@ from unittest import mock
 
 from dlrover.python.common.constants import (
     DistributionStrategy,
+    NodeEventType,
     NodeExitReason,
     NodeStatus,
     NodeType,
@@ -200,6 +201,13 @@ class WorkerManagerTest(unittest.TestCase):
         exited = worker_manager.has_exited_worker()
         self.assertTrue(exited)
 
+        worker = self.job_context.get_mutable_worker_nodes()[0]
+        worker.status = NodeStatus.DELETED
+        worker.reported_status = (NodeEventType.SUCCEEDED_EXITED, 0)
+        self.job_context.update_job_node(worker)
+        exited = worker_manager.has_exited_worker()
+        self.assertTrue(exited)
+
         wait = worker_manager.wait_worker_restart()
         self.assertTrue(wait)
         for node in self.job_context.get_mutable_worker_nodes().values():
@@ -231,7 +239,35 @@ class WorkerManagerTest(unittest.TestCase):
         reset = worker_manager.verify_restarting_training(0)
         self.assertFalse(reset)
 
+    def test_all_failure_with_restarting(self):
+        worker_manager = WorkerManager(
+            self._job_resource,
+            3,
+            self._elastic_job.get_node_service_addr,
+            self._elastic_job.get_node_name,
+        )
+        self.assertFalse(worker_manager.is_all_workers_node_check_failed())
+        self.assertFalse(worker_manager.verify_restarting_training(0))
+        for node in self.job_context.get_mutable_worker_nodes().values():
+            node.update_reported_status(NodeEventType.NODE_CHECK_FAILED)
+        self.assertTrue(worker_manager.is_all_workers_node_check_failed())
+
+        node = self.job_context.get_mutable_worker_nodes()[0]
+        plan = worker_manager.relaunch_node(node)
+        self.job_context.update_job_node(plan.launch_nodes[0])
+        for node in self.job_context.get_mutable_worker_nodes().values():
+            print(node)
+        self.assertFalse(
+            worker_manager.is_all_workers_node_check_failed()
+        )  # include relaunched nodes
+        self.assertTrue(
+            worker_manager.is_all_initial_workers_node_check_failed(
+                self._job_resource.worker_num
+            )
+        )
+
     def test_is_training_hang_by_pending_workers(self):
+        self.job_context.clear_job_nodes()
         _dlrover_ctx.pending_fail_strategy = 2
         worker_manager = WorkerManager(
             self._job_resource,
@@ -548,6 +584,7 @@ class WorkerManagerTest(unittest.TestCase):
         )
 
     def test_is_training_hang_by_insufficient_worker(self):
+        self.job_context.clear_job_nodes()
         worker_manager = WorkerManager(
             self._job_resource,
             3,
@@ -569,6 +606,23 @@ class WorkerManagerTest(unittest.TestCase):
         worker_manager._get_insufficient_timeout = mock.MagicMock(
             return_value=1
         )
+
+        # mock with 2 succeeded
+        for index in range(2):
+            mock_node = Node(
+                NodeType.WORKER,
+                index,
+                NodeResource(0, 0),
+                "test-" + str(index),
+                NodeStatus.SUCCEEDED,
+            )
+            self.job_context.update_job_node(mock_node)
+            mock_nodes[index] = mock_node
+        for _ in range(3):
+            self.assertFalse(
+                worker_manager.is_training_hang_by_insufficient_worker()
+            )
+            time.sleep(0.1)
 
         # mock with 3 running + 1 pending
         for index in range(4):

@@ -11,13 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import importlib
 import os
+from typing import List, Tuple
 
-from dlrover.python.common import grpc
-from dlrover.python.common.constants import UserEnv
+from dlrover.python.common.constants import (
+    CommunicationType,
+    PendingTimeoutStrategyType,
+    UserEnv,
+)
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.singleton import Singleton
+from dlrover.python.util.common_util import (
+    find_free_port_in_range,
+    find_free_port_in_set,
+)
 
 
 class ConfigKeys(object):
@@ -39,29 +47,48 @@ class ConfigKeys(object):
 
 
 class DefaultValues(object):
+    SERVICE_TYPE = CommunicationType.COMM_SERVICE_GRPC
     TRAIN_SPEED_RECORD_NUM = 50
     SEC_TO_START_AUTOSCALE_WORKER = 90
     STEP_TO_ADJUST_WORKER = 200
     OPTIMIZED_WORKER_CPU_THRESHOLD = 20
     SEC_FOR_STABLE_WORKER_COUNT = 60
     SEC_INTERVAL_TO_OPTIMIZE = 300
+    SEC_TO_TIMEOUT_TASK_PROCESS = 1800
     FACTOR_TO_CUT_PENDING_CPU = 2
     FACTOR_TO_CUT_PENDING_MEM = 2
     SEC_TO_WAIT_PENDING_POD = 900  # 15min
-    PENDING_FAIL_STRATEGY = 1  # 0: skip 1: necessary part 2: all
+    PENDING_FAIL_STRATEGY = PendingTimeoutStrategyType.NECESSARY
     SEC_HUGE_TRAINING_THRESHOLD = 1800  # 30min
     STEP_SAMPLE_COUNT_TO_AUTO_WORKER = 5
     SEC_TO_CHANGE_PS = 3600  # 1h
     SEC_TO_WAIT_FAILED_PS = 600  # 10min
     HANG_CPU_USAGE_RATE = 0.05
-    HANG_DETECTION = 1
     GPU_NUM_PER_NODE = 8
     NPU_NUM_PER_NODE = 16
     MAX_METRIC_REC = 30
+    MAX_TRAIN_STEPS = 1000_000
+    PRE_CHECK_OPS: List[Tuple] = [
+        (
+            "dlrover.python.master.diagnosis.precheck_operator",
+            "NoPreCheckOperator",
+            True,
+        )
+    ]
+    HANG_DETECTION = 1
+    HANG_DOWNTIME = 10  # max downtime, unit is minute
+    MIN_HANG_DOWNTIME = 2  # min downtime, unit is minute
+    MAX_CKPT_THRESHOLD = 900  # seconds
+    MAX_AVG_STEPS = 50
 
 
 class Context(Singleton):
     def __init__(self):
+        self.master_service_type = DefaultValues.SERVICE_TYPE
+        self.reporter_cls = (
+            "dlrover.python.common.event.reporter",
+            "EventReporter",
+        )
         self.train_speed_record_num = DefaultValues.TRAIN_SPEED_RECORD_NUM
         self.seconds_to_autoscale_worker = (
             DefaultValues.SEC_TO_START_AUTOSCALE_WORKER
@@ -75,6 +102,9 @@ class Context(Singleton):
         )
         self.seconds_interval_to_optimize = (
             DefaultValues.SEC_INTERVAL_TO_OPTIMIZE
+        )
+        self.seconds_to_timeout_task_process = (
+            DefaultValues.SEC_TO_TIMEOUT_TASK_PROCESS
         )
         self.factor_to_cut_pending_cpu = (
             DefaultValues.FACTOR_TO_CUT_PENDING_CPU
@@ -103,9 +133,12 @@ class Context(Singleton):
         # The strategy of 'hang detection':
         # 0: log only; 1: notify; 2: with fault tolerance
         self.hang_detection = DefaultValues.HANG_DETECTION
+        # The duration of downtime as training hang, unit is minute
+        self.hang_downtime = DefaultValues.HANG_DOWNTIME
         self.gpu_per_node = DefaultValues.GPU_NUM_PER_NODE
         self.npu_per_node = DefaultValues.NPU_NUM_PER_NODE
-        self.max_metric_records = DefaultValues.MAX_METRIC_REC
+        # pre-check args
+        self.pre_check_operators = DefaultValues.PRE_CHECK_OPS
 
     def set_params_from_brain(self):
         self.train_speed_record_num = self.get_param_value_from_brain(
@@ -174,13 +207,13 @@ class Context(Singleton):
             for port in host_ports_env.split(","):
                 ports.append(int(port))
             try:
-                self.master_port = grpc.find_free_port_in_set(ports)
+                self.master_port = find_free_port_in_set(ports)
             except RuntimeError as e:
                 logger.warning(e)
         elif port > 0:
             self.master_port = port
         if self.master_port is None:
-            self.master_port = grpc.find_free_port_in_range(20000, 30000)
+            self.master_port = find_free_port_in_range(20000, 30000)
 
     def get_param_value_from_brain(self, key_name, default_value, dtype=float):
         """TODO: Get the configured value from Brain service."""
@@ -193,3 +226,49 @@ class Context(Singleton):
     @property
     def user_id(self):
         return os.getenv(UserEnv.USER_ID, "")
+
+    def pre_check_enabled(self):
+        return (
+            self.pre_check_operators
+            and len(self.get_pre_check_operators()) > 0
+        )
+
+    def get_pre_check_operators(self):
+        result_ops = []
+        if not self.pre_check_operators:
+            return result_ops
+
+        for op_desc in self.pre_check_operators:
+            try:
+                module_name = op_desc[0]
+                class_name = op_desc[1]
+                module = importlib.import_module(module_name)
+                if hasattr(module, class_name):
+                    cls = getattr(module, class_name)
+                    result_ops.append(cls())
+            except Exception:
+                logger.warning(
+                    "Invalid pre-check "
+                    f"operators: {self.pre_check_operators}"
+                )
+        return result_ops
+
+    def is_pre_check_operator_bypass(self, pre_check_op) -> bool:
+        if not pre_check_op or not self.pre_check_operators:
+            return False
+
+        module_name = pre_check_op.__module__
+        class_name = pre_check_op.__class__.__name__
+
+        for op_desc in self.pre_check_operators:
+            if module_name == op_desc[0] and class_name == op_desc[1]:
+                if len(op_desc) == 2:
+                    return False
+                else:
+                    value = op_desc[2]
+                    if isinstance(value, bool):
+                        return value
+                    elif value.lower() in {"true", "yes", "t", "y", "1"}:
+                        return True
+                break
+        return False

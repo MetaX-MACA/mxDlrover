@@ -265,10 +265,11 @@ class CheckpointSaverTest(unittest.TestCase):
             saver._shm_handlers[0].shared_memory = SharedMemory(
                 name=saver._shm_handlers[0]._shm_name
             )
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             AsyncCheckpointSaver._saver_instance = saver
             AsyncCheckpointSaver.register_signal_handler()
             handler = signal.getsignal(signal.SIGTERM)
-            handler(None, None)
+            handler(signal.SIGTERM, None)
             with self.assertRaises(KeyboardInterrupt):
                 handler = signal.getsignal(signal.SIGINT)
                 handler(signal.SIGINT, None)

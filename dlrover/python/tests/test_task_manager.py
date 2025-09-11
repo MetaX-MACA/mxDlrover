@@ -15,8 +15,8 @@ import json
 import unittest
 
 from dlrover.proto import elastic_training_pb2
+from dlrover.python.common.comm import TaskResult
 from dlrover.python.common.constants import NodeType
-from dlrover.python.common.grpc import TaskResult
 from dlrover.python.master.shard.task_manager import DatasetShardCheckpoint
 from dlrover.python.tests.test_utils import (
     create_task_manager,
@@ -28,6 +28,7 @@ class TaskMangerTest(unittest.TestCase):
     def test_dispatch_task(self):
         dataset_name = "test"
         task_manager = create_task_manager()
+        self.assertTrue(task_manager.is_dataset_initialized())
         self.assertEqual(len(task_manager._datasets), 1)
         task = task_manager.get_dataset_task(NodeType.WORKER, 0, dataset_name)
         self.assertEqual(task.task_id, 0)

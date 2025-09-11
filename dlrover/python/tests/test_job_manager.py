@@ -17,36 +17,43 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from typing import Dict
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from kubernetes import client
 
 from dlrover.proto import elastic_training_pb2
-from dlrover.python.common.constants import (
-    DistributionStrategy,
-    ElasticJobLabel,
-    JobExitReason,
-    NodeEventType,
-    NodeExitReason,
-    NodeStatus,
-    NodeType,
-    TrainingExceptionLevel,
-)
-from dlrover.python.common.grpc import (
+from dlrover.python.common.comm import (
     DataLoaderConfig,
     GPUStats,
     OptimizerConfig,
     ParallelConfig,
 )
-from dlrover.python.common.node import NodeGroupResource, NodeResource
+from dlrover.python.common.constants import (
+    DistributionStrategy,
+    ElasticJobLabel,
+    JobExitReason,
+    JobStage,
+    NodeEventType,
+    NodeExitReason,
+    NodeStatus,
+    NodeType,
+    PreCheckStatus,
+    TrainingExceptionLevel,
+)
+from dlrover.python.common.node import (
+    NodeEvent,
+    NodeGroupResource,
+    NodeResource,
+)
 from dlrover.python.diagnosis.common.diagnosis_action import (
     EventAction,
     NoAction,
+    NodeAction,
 )
 from dlrover.python.master.dist_master import DistributedJobMaster
-from dlrover.python.master.monitor.error_monitor import SimpleErrorMonitor
-from dlrover.python.master.monitor.speed_monitor import SpeedMonitor
+from dlrover.python.master.monitor.perf_monitor import PerfMonitor
 from dlrover.python.master.node.dist_job_manager import (
     DistributedJobManager,
     create_job_manager,
@@ -72,7 +79,7 @@ from dlrover.python.master.node.training_node import (
     update_nodes_priority,
 )
 from dlrover.python.master.resource.job import JobResource
-from dlrover.python.master.watcher.base_watcher import Node, NodeEvent
+from dlrover.python.master.watcher.base_watcher import Node
 from dlrover.python.scheduler.job import LocalJobArgs
 from dlrover.python.tests.test_utils import (
     MockK8sAllreduceJobArgs,
@@ -141,6 +148,7 @@ class DistributedJobManagerTest(unittest.TestCase):
 
     def tearDown(self):
         self.job_context.clear_job_nodes()
+        self.job_context._request_stop = False
 
     def test_job_resource(self):
         job = JobResource()
@@ -238,9 +246,16 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_relaunch_node(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         self.assertEqual(manager._ps_relaunch_max_num, 1)
         manager.start()
+
+        manager._job_optimizer.adjust_oom_resource = MagicMock(
+            return_value=None
+        )
+
+        # reset failed nodes for testing
+        self.job_context._failed_nodes = {}
         self.assertEqual(manager._job_args.job_uuid, _MOCK_JOB_UUID)
 
         job_nodes = self.job_context.job_nodes()
@@ -289,6 +304,11 @@ class DistributedJobManagerTest(unittest.TestCase):
         should_relaunch = manager._should_relaunch(node, NODE_STATE_FLOWS[6])
         self.assertTrue(should_relaunch)
 
+        self.job_context.update_job_stage(JobStage.JOB_STOPPING)
+        should_relaunch = manager._should_relaunch(node, NODE_STATE_FLOWS[6])
+        self.assertFalse(should_relaunch)
+        self.job_context.update_job_stage(JobStage.JOB_INIT)
+
         node.relaunch_count = node.max_relaunch_count + 1
         should_relaunch = manager._should_relaunch(node, NODE_STATE_FLOWS[6])
         self.assertFalse(should_relaunch)
@@ -297,14 +317,40 @@ class DistributedJobManagerTest(unittest.TestCase):
         should_relaunch = manager._should_relaunch(node, NODE_STATE_FLOWS[6])
         self.assertFalse(should_relaunch)
 
+        self.assertEqual(self.job_context.get_failed_node_cnt(), 0)
         manager.handle_training_failure(
             NodeType.WORKER, 0, level=TrainingExceptionLevel.NODE_ERROR
         )
+        manager.handle_training_failure(
+            NodeType.WORKER, 0, level=TrainingExceptionLevel.NODE_ERROR
+        )
+        self.assertEqual(self.job_context.get_failed_node_cnt(), 1)
+        manager.handle_training_failure(
+            NodeType.WORKER, 1, level=TrainingExceptionLevel.NODE_ERROR
+        )
+        self.assertEqual(self.job_context.get_failed_node_cnt(), 2)
+
+        # reset relaunch count
+        node.relaunch_count = 0
+        node.exit_reason = NodeExitReason.OOM
+        node.config_resource.memory = 655
+        self.assertTrue(manager._should_relaunch(node, NODE_STATE_FLOWS[6]))
+
+        node.config_resource.memory = 65537
+        self.assertFalse(manager._should_relaunch(node, NODE_STATE_FLOWS[6]))
+
+        node.config_resource.memory = 655
+        manager.is_all_reduce_type_job = MagicMock(return_value=True)
+        node.exit_reason = NodeExitReason.OOM
+        self.assertFalse(manager._should_relaunch(node, NODE_STATE_FLOWS[6]))
+
+        node.exit_reason = NodeExitReason.RELAUNCHED
+        self.assertFalse(manager._should_relaunch(node, NODE_STATE_FLOWS[6]))
 
     def test_relaunch_under_deleted_event(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager.start()
 
         pods = []
@@ -370,7 +416,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_get_dead_node_event(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
         ts = int(time.time())
         manager.collect_node_heart_beat(NodeType.WORKER, 0, ts)
@@ -413,7 +459,7 @@ class DistributedJobManagerTest(unittest.TestCase):
                 node.start_time = now - timedelta(seconds=600)
             else:
                 if index == 1:
-                    node.reported_status = NodeEventType.SUCCEEDED_EXITED
+                    node.reported_status = (NodeEventType.SUCCEEDED_EXITED, 0)
                 node.create_time = now - timedelta(seconds=1400)
                 node.start_time = now - timedelta(seconds=1200)
             self.job_context.update_job_node(node)
@@ -425,7 +471,7 @@ class DistributedJobManagerTest(unittest.TestCase):
             node.status = NodeStatus.RUNNING
             now = datetime.now()
             node.heartbeat_time = (now - timedelta(seconds=1000)).timestamp()
-            node.reported_status = NodeEventType.FAILED_EXITED
+            node.reported_status = (NodeEventType.FAILED_EXITED, 0)
             node.create_time = now - timedelta(seconds=800)
             node.start_time = now - timedelta(seconds=600)
             self.job_context.update_job_node(node)
@@ -438,9 +484,9 @@ class DistributedJobManagerTest(unittest.TestCase):
             now = datetime.now()
             node.heartbeat_time = (now - timedelta(seconds=1000)).timestamp()
             if index == 0:
-                node.reported_status = NodeEventType.SUCCEEDED_EXITED
+                node.reported_status = (NodeEventType.SUCCEEDED_EXITED, 0)
             else:
-                node.reported_status = NodeEventType.FAILED_EXITED
+                node.reported_status = (NodeEventType.FAILED_EXITED, 0)
             node.create_time = now - timedelta(seconds=1400)
             node.start_time = now - timedelta(seconds=1200)
             self.job_context.update_job_node(node)
@@ -450,7 +496,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_relaunch_training_master(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         group_resources = manager._job_resource.node_group_resources
         group_resources[NodeType.MASTER] = NodeGroupResource(
             1, NodeResource(1, 256)
@@ -465,7 +511,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_process_list_nodes(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
         job_nodes = self.job_context.job_nodes()
         self.assertFalse(4 in job_nodes[NodeType.WORKER])
@@ -502,7 +548,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_process_list_nodes_for_empty_case(self, mock_method):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         job_nodes = {
             NodeType.PS: {
                 0: Node(
@@ -534,7 +580,7 @@ class DistributedJobManagerTest(unittest.TestCase):
         params.node_args.pop(NodeType.PS)
         params.node_args.pop(NodeType.CHIEF)
         params.node_args.pop(NodeType.EVALUATOR)
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._job_optimizer.init_job_resource(manager._job_resource)
         manager._adjust_worker_for_estimator()
         manager._init_nodes()
@@ -569,7 +615,7 @@ class DistributedJobManagerTest(unittest.TestCase):
         task_callback = TaskRescheduleCallback(task_manager)
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
         manager.add_node_event_callback(task_callback)
 
@@ -590,7 +636,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_create_initial_nodes(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
         plan = manager._create_initial_scale_plan()
         self.assertEqual(
@@ -607,7 +653,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_check_worker_status(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
         self.assertFalse(manager.all_workers_exited())
 
@@ -646,7 +692,7 @@ class DistributedJobManagerTest(unittest.TestCase):
         self.assertTrue(manager.all_critical_node_completed())
 
         for worker in job_nodes[NodeType.WORKER].values():
-            worker.reported_status = NodeEventType.NODE_CHECK_FAILED
+            worker.reported_status = (NodeEventType.NODE_CHECK_FAILED, 0)
         self.job_context.update_job_nodes(job_nodes)
         self.assertTrue(
             manager._worker_manager.is_all_workers_node_check_failed()
@@ -670,23 +716,23 @@ class DistributedJobManagerTest(unittest.TestCase):
         reason = callback.get_job_exit_reason(node)
         self.assertEqual(reason, JobExitReason.CODE_ERROR)
 
-        master.speed_monitor.add_running_worker(NodeType.WORKER, 0)
-        master.speed_monitor.add_running_worker(NodeType.WORKER, 1)
+        master.perf_monitor.add_running_worker(NodeType.WORKER, 0)
+        master.perf_monitor.add_running_worker(NodeType.WORKER, 1)
         cluster_context = ClusterContext(master.job_manager)
-        master.speed_monitor.set_target_worker_num(2)
+        master.perf_monitor.set_target_worker_num(2)
         node.exit_reason = NodeExitReason.FATAL_ERROR
         callback.on_node_failed(node, cluster_context)
-        self.assertEqual(master.speed_monitor._target_worker_num, 1)
-        self.assertEqual(len(master.speed_monitor.running_workers), 1)
-        master.speed_monitor.set_target_worker_num(2)
-        master.speed_monitor._workers.add(("worker", 0))
+        self.assertEqual(master.perf_monitor._target_worker_num, 1)
+        self.assertEqual(len(master.perf_monitor.running_workers), 1)
+        master.perf_monitor.set_target_worker_num(2)
+        master.perf_monitor._workers.add(("worker", 0))
         callback.on_node_succeeded(node, cluster_context)
-        self.assertEqual(master.speed_monitor._target_worker_num, 1)
+        self.assertEqual(master.perf_monitor._target_worker_num, 1)
 
     def test_all_running_node_hang(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
 
         hang = manager.all_running_node_hanged()
@@ -708,7 +754,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_no_cpu_request_node_hang(self):
         params = MockK8sJobWithoutCPURequestArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
 
         hang = manager.all_running_node_hanged()
@@ -736,7 +782,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_early_stop_part1(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
 
         job_nodes = self.job_context.job_nodes()
@@ -782,7 +828,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_early_stop_part2(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
 
         # ps normal + worker pending
@@ -830,7 +876,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_early_stop_part3(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
 
         manager.is_all_reduce_type_job = mock.MagicMock(return_value=True)
@@ -849,10 +895,10 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_early_stop_part4(self):
         params = MockK8sAllreduceJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._init_nodes()
 
-        manager._worker_manager.is_all_workers_node_check_failed = (
+        manager._worker_manager.is_all_initial_workers_node_check_failed = (
             mock.MagicMock(return_value=True)
         )
         result, reason, msg = manager.should_early_stop()
@@ -862,7 +908,7 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_when_node_not_init(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         job_context = get_job_context()
         job_nodes = job_context.job_nodes()
         self.assertTrue(len(job_nodes) == 0)
@@ -872,19 +918,19 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_start_and_stop(self):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
 
         manager.start()
         active_threads_name = [t.name for t in threading.enumerate()]
         self.assertIn("node_monitor", active_threads_name)
-        self.assertIn("job_diagnosing", active_threads_name)
+        self.assertIn("node_heartbeat_monitor", active_threads_name)
         manager.stop()
 
     def test_concurrency_heart_beat_collecting(self):
         params = MockK8sAllreduceJobArgs()
         worker_size = 1000
         params.initilize(worker_size)
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
         manager._scaler._check_master_service_avaliable = mock.MagicMock(
             return_value=True
         )
@@ -934,24 +980,106 @@ class DistributedJobManagerTest(unittest.TestCase):
     def test_process_diagnosis_action(self, mock_method):
         params = MockK8sPSJobArgs()
         params.initilize()
-        manager = create_job_manager(params, SpeedMonitor())
+        manager = create_job_manager(params, PerfMonitor())
 
-        manager._process_diagnosis_action(None)
+        manager.process_diagnosis_action(None)
         self.assertEqual(mock_method.call_count, 0)
 
-        manager._process_diagnosis_action(NoAction)
+        manager.process_diagnosis_action(NoAction())
         self.assertEqual(mock_method.call_count, 0)
 
-        manager._process_diagnosis_action(EventAction())
+        manager.process_diagnosis_action(EventAction())
         self.assertEqual(mock_method.call_count, 1)
+
+    def test_process_event_safely(self):
+        params = MockK8sPSJobArgs()
+        params.initilize()
+        manager = create_job_manager(params, PerfMonitor())
+
+        manager._process_event = mock.MagicMock(side_effect=RuntimeError)
+        try:
+            manager._process_event_safely(None)
+        except Exception:
+            self.fail()
+
+    @patch(
+        "dlrover.python.master.node.dist_job_manager.DistributedJobManager."
+        "_process_event_safely"
+    )
+    def test_process_node_action(self, mock_process_event):
+        params = MockK8sPSJobArgs()
+        params.initilize()
+        manager = create_job_manager(params, PerfMonitor())
+
+        # no target node
+        action = NodeAction(node_id=123, node_type="worker")
+        manager._process_node_action(action)
+
+        # with target node
+        get_job_context()._job_nodes = {"worker": {0: Node("worker", 0)}}
+        action = NodeAction(node_id=0, node_type="worker")
+        manager._process_node_action(action)
+        mock_process_event.assert_called_once()
+
+    @patch(
+        "dlrover.python.master.node.dist_job_manager.DistributedJobManager."
+        "_process_event_safely"
+    )
+    def test_master_restart_with_node_relaunched(self, mock_process_event):
+        params = MockK8sPSJobArgs()
+        params.initilize()
+        manager = create_job_manager(params, PerfMonitor())
+
+        # node0 -> node2 and node1 -> node3 before master restart
+        node0 = Node(
+            NodeType.WORKER, 0, rank_index=0, status=NodeStatus.INITIAL
+        )
+        node1 = Node(
+            NodeType.WORKER, 1, rank_index=1, status=NodeStatus.INITIAL
+        )
+        node2 = Node(
+            NodeType.WORKER, 2, rank_index=0, status=NodeStatus.RUNNING
+        )
+        node3 = Node(
+            NodeType.WORKER, 3, rank_index=1, status=NodeStatus.RUNNING
+        )
+
+        list_nodes = [node2, node3]
+        exist_nodes: Dict[str, Dict[int, Node]] = {
+            NodeType.WORKER: {0: node0, 1: node1}
+        }
+        manager.get_job_nodes = mock.MagicMock(return_value=exist_nodes)
+        manager._process_list_nodes(list_nodes)
+
+        # assert node0 and node1 got deleted event
+        self.assertEqual(mock_process_event.call_count, 4)
+
+        third_call_args, _ = mock_process_event.call_args_list[2]
+        third_event = third_call_args[0]
+        self.assertEqual(third_event.event_type, NodeEventType.DELETED)
+        self.assertEqual(third_event.node.id, 0)
+        self.assertEqual(third_event.node.rank_index, 0)
+
+        fourth_call_args, _ = mock_process_event.call_args_list[3]
+        forth_event = fourth_call_args[0]
+        self.assertEqual(forth_event.event_type, NodeEventType.DELETED)
+        self.assertEqual(forth_event.node.id, 1)
+        self.assertEqual(forth_event.node.rank_index, 1)
 
 
 class LocalJobManagerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.job_context = get_job_context()
+
+    def tearDown(self):
+        self.job_context.clear_job_nodes()
+        self.job_context.request_stop()
+
     def test_local_job_manager(self):
         args = LocalJobArgs("local", "default", "test")
         args.initilize()
         args.node_args[NodeType.WORKER].group_resource.count = 4
-        job_manager = LocalJobManager(args, error_monitor=SimpleErrorMonitor())
+        job_manager = LocalJobManager(args)
         job_manager.start()
 
         job_context = get_job_context()
@@ -984,3 +1112,34 @@ class LocalJobManagerTest(unittest.TestCase):
         worker = job_nodes[NodeType.WORKER][0]
         self.assertEqual(worker.paral_config, paral_config)
         job_manager.handle_training_failure(NodeType.WORKER, 3)
+
+        job_context.set_pre_check_status(PreCheckStatus.FAIL)
+        self.assertEqual(job_context.get_pre_check_status(), "FAIL")
+
+        job_context.update_total_worker_num(123)
+        self.assertEqual(job_context.get_total_worker_num(), 123)
+
+        self.assertFalse(job_context.is_request_stopped())
+        job_context.request_stop()
+        self.assertTrue(job_context.is_request_stopped())
+
+    def test_suspend_unsuspend_job_context(self):
+        job_context = get_job_context()
+
+        # test for regular suspend
+        init_job_stage = JobStage.JOB_INIT
+        job_context.update_job_stage(init_job_stage)
+
+        job_context.request_suspend()
+        self.assertEqual(job_context.is_suspended(), True)
+
+        job_context.request_unsuspend()
+        self.assertEqual(job_context.get_job_stage(), init_job_stage)
+
+        # try to suspend stopped job, but not work
+        job_context.request_stop()
+        job_context.request_unsuspend()
+        self.assertEqual(job_context.get_job_stage(), JobStage.JOB_STOPPED)
+
+        job_context.request_suspend()
+        self.assertEqual(job_context.get_job_stage(), JobStage.JOB_STOPPED)

@@ -18,7 +18,7 @@ from tensorflow.python.training.session_run_hook import (
     SessionRunHook,
 )
 
-from dlrover.python.common.grpc import ModelInfo, OpStats, TensorStats
+from dlrover.python.common.comm import ModelInfo, OpStats, TensorStats
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.elastic_agent.master_client import MasterClient
 from dlrover.python.elastic_agent.monitor.training import (
@@ -99,7 +99,7 @@ class ReportModelInfoHook(SessionRunHook):
         if not self._is_chief:
             return
         self._global_step = run_values.results["global_step"]
-        self._training_reporter.report_resource_with_step(self._global_step)
+        self._training_reporter.report_step(self._global_step)
 
 
 class ElasticDataShardReportHook(SessionRunHook):

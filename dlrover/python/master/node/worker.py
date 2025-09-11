@@ -19,6 +19,7 @@ from typing import Dict, List, Tuple
 from dlrover.python.common.constants import (
     DistributionStrategy,
     JobConstant,
+    NodeEventType,
     NodeExitReason,
     NodeStatus,
     NodeType,
@@ -280,13 +281,27 @@ class WorkerManager(TrainingNodeManager):
         return plan
 
     def has_exited_worker(self):
-        """Check whether there is exited worker except evicted workers."""
+        """Check whether there is exited worker except evicted workers.
+
+        If the worker has reported SUCCEEDED_EXITED, but been deleted
+        by dlrover finally, the status will be DELETED instead of SUCCEEDED
+        In such cases the worker should also be regard as exited worker
+        """
         nodes = self._get_nodes()
         for worker in nodes.values():
             if (
                 worker.exit_reason == NodeExitReason.FATAL_ERROR
                 or worker.status == NodeStatus.SUCCEEDED
+                or (
+                    worker.status == NodeStatus.DELETED
+                    and worker.get_reported_status()
+                    == NodeEventType.SUCCEEDED_EXITED
+                )
             ):
+                logger.debug(
+                    f"Worker {worker} has exited: "
+                    f"{worker.exit_reason} {worker.status}"
+                )
                 return True
         return False
 
@@ -298,6 +313,7 @@ class WorkerManager(TrainingNodeManager):
                 worker.exit_reason == NodeExitReason.KILLED
                 and worker.relaunch_count < worker.max_relaunch_count
             ):
+                logger.debug(f"Worker {worker} is restarting")
                 return True
         return False
 
@@ -511,7 +527,10 @@ class WorkerManager(TrainingNodeManager):
                 available_nodes.append(node)
 
         now = time.time()
-        if len(available_nodes) < self.get_min_nodes_required():
+        if (
+            len(available_nodes) > 0
+            and len(available_nodes) < self.get_min_nodes_required()
+        ):
             if self._last_insufficient_nodes_timestamp == 0:
                 self._last_insufficient_nodes_timestamp = int(now)
                 logger.warning(
@@ -561,3 +580,16 @@ class WorkerManager(TrainingNodeManager):
     def is_all_workers_node_check_failed(self):
         nodes = self._get_nodes()
         return all([node.is_node_check_failed() for _, node in nodes.items()])
+
+    def is_all_initial_workers_node_check_failed(self, worker_num: int):
+        """
+        Check all initial workers are check-failed
+        (exclude new relaunched workers)"""
+        nodes = [
+            node
+            for _, node in self._get_nodes().items()
+            if node.id < worker_num
+        ]
+        return len(nodes) > 0 and all(
+            [node.is_node_check_failed() for node in nodes]
+        )

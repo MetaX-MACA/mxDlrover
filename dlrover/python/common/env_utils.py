@@ -14,10 +14,11 @@
 # limitations under the License.
 
 import os
+import socket
 
 import psutil
 
-from dlrover.python.common.constants import NodeEnv
+from dlrover.python.common.constants import CommunicationType, NodeEnv
 from dlrover.python.common.log import default_logger as logger
 
 
@@ -127,3 +128,24 @@ def is_worker_process(pid):
         return True
     else:
         return False
+
+
+def get_hostname_and_ip():
+    """Get the hostname and IP address."""
+
+    hostname = socket.gethostname()
+    try:
+        ip_address = socket.gethostbyname(hostname)
+    except socket.error:
+        ip_address = "Unknown"
+
+    return hostname, ip_address
+
+
+def is_ray_mode():
+    if (
+        get_env(NodeEnv.DLROVER_MASTER_SERVICE_TYPE)
+        == CommunicationType.COMM_SERVICE_RAY
+    ):
+        return True
+    return False

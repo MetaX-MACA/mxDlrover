@@ -13,9 +13,17 @@
 
 import copy
 import threading
-from typing import Dict, Optional
+import time
+from typing import Dict, Optional, Union
 
-from dlrover.python.common.constants import NodeType
+from dlrover.python.common.constants import (
+    JobStage,
+    NodeStatus,
+    NodeType,
+    PreCheckStatus,
+)
+from dlrover.python.common.global_context import Context
+from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node
 from dlrover.python.common.singleton import Singleton
 from dlrover.python.diagnosis.common.constants import (
@@ -25,6 +33,8 @@ from dlrover.python.diagnosis.common.constants import (
 from dlrover.python.diagnosis.common.diagnosis_action import (
     DiagnosisActionQueue,
 )
+
+_dlrover_context = Context.singleton_instance()
 
 
 class JobContext(Singleton):
@@ -36,18 +46,40 @@ class JobContext(Singleton):
     def __init__(self):
         self._action_queue = DiagnosisActionQueue()
         self._job_nodes: Dict[str, Dict[int, Node]] = {}
-        self._locker = threading.Lock()
+        self._total_worker_num = 0
+        self._failed_nodes: Dict[int, int] = {}
 
-    def enqueue_action(self, action):
+        self._pre_check_status: str = PreCheckStatus.CHECKING
+
+        self._locker = threading.Lock()
+        self._job_stage: str = JobStage.JOB_INIT
+        self._job_pre_status: str = JobStage.JOB_INIT
+
+    def get_job_stage(self):
+        with self._locker:
+            return self._job_stage
+
+    def update_job_stage(self, stage):
+        with self._locker:
+            self._job_stage = stage
+
+    def enqueue_actions(self, actions):
+        for action in actions:
+            self.enqueue_diagnosis_action(action)
+
+    def enqueue_diagnosis_action(self, action):
         if not action or action.action_type == DiagnosisActionType.NONE:
             return
         self._action_queue.add_action(action)
 
     def next_action(
         self,
-        instance=DiagnosisConstant.LOCAL_INSTANCE,
+        instance=DiagnosisConstant.MASTER_INSTANCE,
     ):
         return self._action_queue.next_action(instance=instance)
+
+    def clear_actions(self):
+        self._action_queue.clear()
 
     def get_mutable_ps_nodes(self):
         return self.get_mutable_job_nodes(NodeType.PS)
@@ -131,6 +163,28 @@ class JobContext(Singleton):
             return None
         return self._job_nodes[node_type][node_id]
 
+    def job_node_by_rank(self, node_type: str, rank: int) -> Optional[Node]:
+        """Get node by type and rank
+
+        Args:
+            node_type: node type
+            rank: rank index
+
+        Returns:
+            Node or None if node does not exist
+
+        The caller should use self._locker to synchronize
+        """
+        node_type = self._preprocess(node_type)
+        if node_type not in self._job_nodes:
+            return None
+
+        for node in self._job_nodes[node_type].values():
+            if node.rank_index == rank and node.status == NodeStatus.RUNNING:
+                return node
+
+        return None
+
     def dup_job_node(self, node_type: str, node_id: int) -> Optional[Node]:
         """Get deepcopy of node by type and id
 
@@ -178,6 +232,59 @@ class JobContext(Singleton):
     def clear_job_nodes(self):
         with self._locker:
             self._job_nodes = {}
+
+    def report_failed_node(self, node_id: Union[int, str] = None):
+        if node_id is None:
+            return
+
+        node_id = int(node_id)
+        with self._locker:
+            if node_id not in self._failed_nodes:
+                self._failed_nodes[node_id] = int(time.time())
+
+    def get_failed_node_cnt(self):
+        return len(self._failed_nodes)
+
+    def set_pre_check_status(self, status: str):
+        self._pre_check_status = status
+
+    def get_pre_check_status(self):
+        return self._pre_check_status
+
+    def update_total_worker_num(self, worker_num: int):
+        self._total_worker_num = worker_num
+
+    def get_total_worker_num(self):
+        return self._total_worker_num
+
+    def request_stop(self):
+        self._job_stage = JobStage.JOB_STOPPED
+
+    def is_request_stopped(self):
+        return self._job_stage == JobStage.JOB_STOPPED
+
+    def request_suspend(self):
+        with self._locker:
+            if (
+                self._job_stage == JobStage.JOB_RUNNING
+                or self._job_stage == JobStage.JOB_INIT
+            ):
+                logger.info("job is suspended")
+                self._job_pre_status = self._job_stage
+                self._job_stage = JobStage.JOB_SUSPENDED
+            else:
+                logger.info(f"{self._job_stage} job skip suspend")
+
+    def request_unsuspend(self):
+        with self._locker:
+            if self._job_stage == JobStage.JOB_SUSPENDED:
+                logger.info("job is unsuspended")
+                self._job_stage = self._job_pre_status
+            else:
+                logger.info(f"{self._job_stage} job can not be unsuspend")
+
+    def is_suspended(self):
+        return self._job_stage == JobStage.JOB_SUSPENDED
 
 
 def get_job_context() -> JobContext:

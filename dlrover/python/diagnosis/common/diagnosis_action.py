@@ -146,11 +146,12 @@ class EventAction(DiagnosisAction):
         timestamp=0,
         expired_time_period=0,
         executable_time_period=0,
+        instance=DiagnosisConstant.MASTER_INSTANCE,
         **kwargs,
     ):
         super().__init__(
             action_type=DiagnosisActionType.EVENT,
-            instance=DiagnosisConstant.MASTER_INSTANCE,
+            instance=instance,
             timestamp=timestamp,
             expired_time_period=expired_time_period,
             executable_time_period=executable_time_period,
@@ -181,13 +182,28 @@ class EventAction(DiagnosisAction):
     def event_labels(self):
         return self._event_labels
 
+    def __repr__(self):
+        return (
+            f"action_type:{self._action_type};"
+            f"instance:{self._instance};"
+            f"timestamp:{self._timestamp};"
+            f"expired_time_period:{self._expired_time_period};"
+            f"event_type:{self._event_type};"
+            f"event_instance:{self._event_type};"
+            f"event_action:{self._event_instance};"
+            f"event_msg:{self._event_msg};"
+            f"event_labels:{self._event_labels}"
+        )
+
 
 class NodeAction(DiagnosisAction):
     def __init__(
         self,
+        node_id: int,
+        node_type: str,
         node_status: str = "",
         reason: str = "",
-        node_id=DiagnosisConstant.LOCAL_INSTANCE,
+        instance=DiagnosisConstant.MASTER_INSTANCE,
         action_type=DiagnosisActionType.NONE,
         timestamp=0,
         expired_time_period=0,
@@ -195,16 +211,22 @@ class NodeAction(DiagnosisAction):
     ):
         super().__init__(
             action_type,
-            node_id,
+            instance,
             timestamp,
             expired_time_period,
         )
+        self._node_id = node_id
+        self._node_type = node_type
         self._node_status = node_status
         self._reason = reason
 
     @property
     def node_id(self):
-        return self.instance
+        return self._node_id
+
+    @property
+    def node_type(self):
+        return self._node_type
 
     @property
     def node_status(self):
@@ -213,6 +235,53 @@ class NodeAction(DiagnosisAction):
     @property
     def reason(self):
         return self._reason
+
+    def __repr__(self):
+        return (
+            f"action_type:{self._action_type};"
+            f"instance:{self._instance};"
+            f"timestamp:{self._timestamp};"
+            f"expired_time_period:{self._expired_time_period};"
+            f"node_id:{self._node_id};"
+            f"node_type:{self._node_type};"
+            f"node_status:{self._node_status};"
+            f"reason:{self._reason}"
+        )
+
+
+class JobAbortionAction(DiagnosisAction):
+    def __init__(
+        self,
+        reason: str = "",
+        msg: str = "",
+        **kwargs,
+    ):
+        super().__init__(
+            DiagnosisActionType.JOB_ABORT,
+            DiagnosisConstant.MASTER_INSTANCE,
+            0,
+            0,
+        )
+        self._reason = reason
+        self._msg = msg
+
+    @property
+    def reason(self):
+        return self._reason
+
+    @property
+    def msg(self):
+        return self._msg
+
+    def __repr__(self):
+        return (
+            f"action_type:{self._action_type};"
+            f"instance:{self._instance};"
+            f"timestamp:{self._timestamp};"
+            f"expired_time_period:{self._expired_time_period};"
+            f"reason:{self._reason};"
+            f"msg:{self._msg}"
+        )
 
 
 def is_same_action(action1: DiagnosisAction, action2: DiagnosisAction) -> bool:
@@ -260,6 +329,10 @@ class DiagnosisActionQueue:
         with self._lock:
             self._actions.clear()
 
+    def len(self):
+        with self._lock:
+            return sum(len(d) for d in self._actions.values())
+
     def next_action(
         self,
         instance=DiagnosisConstant.LOCAL_INSTANCE,
@@ -271,19 +344,28 @@ class DiagnosisActionQueue:
             ):
                 return NoAction()
 
+            logger.debug(f"Dump {instance} actions before: {self._actions}")
             actions = self._actions[instance]
+
             waiting_actions: Deque[DiagnosisAction] = deque()
             while len(actions) > 0:
                 action = actions.popleft()
                 if action.is_expired():
-                    logger.info(f"Skip expired diagnosis action: {action}.")
+                    logger.info(
+                        f"Skip expired diagnosis action({instance}): {action}"
+                    )
                 elif action.is_executable():
                     while len(waiting_actions) > 0:
                         waiting_action = waiting_actions.pop()
                         actions.appendleft(waiting_action)
+                    logger.info(
+                        f"Get diagnosis action({instance}): {action}, "
+                        f"Remain: {actions}/{len(actions)}"
+                    )
                     return action
                 else:
                     waiting_actions.append(action)
 
             self._actions[instance] = waiting_actions
+            logger.debug(f"Dump {instance} actions after: {self._actions}")
             return NoAction()

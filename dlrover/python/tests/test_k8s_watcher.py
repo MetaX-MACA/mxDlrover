@@ -15,29 +15,33 @@
 import datetime
 import json
 import os
+import time
 import unittest
 from typing import List
 from unittest import mock
+from unittest.mock import patch
 
 from kubernetes import client
 
 from dlrover.python.common.constants import (
     ElasticJobLabel,
+    JobStage,
     NodeEventType,
     NodeExitReason,
     NodeStatus,
     NodeType,
 )
-from dlrover.python.common.node import Node
+from dlrover.python.common.node import Node, NodeEvent
 from dlrover.python.master.resource.optimizer import ResourcePlan
-from dlrover.python.master.watcher.base_watcher import NodeEvent
 from dlrover.python.master.watcher.k8s_watcher import (
+    K8sElasticJobWatcher,
     K8sScalePlanWatcher,
     PodWatcher,
     _convert_pod_event_to_node_event,
     _get_pod_exit_reason,
     _verify_restarting_training,
 )
+from dlrover.python.scheduler.job import JobArgs
 from dlrover.python.tests.test_utils import (
     WITH_TO_DELETED,
     create_pod,
@@ -81,6 +85,8 @@ class PodWatcherTest(unittest.TestCase):
                 "2022-11-11 11:11:11", "%Y-%m-%d %H:%M:%S"
             ),
         )
+        self.assertIsNotNone(node.host_name)
+        self.assertIsNotNone(node.host_ip)
         node: Node = nodes[-2]
         self.assertEqual(node.id, 2)
         self.assertEqual(node.type, NodeType.WORKER)
@@ -138,12 +144,30 @@ class PodWatcherTest(unittest.TestCase):
         )
         exit_reason = _get_pod_exit_reason(pod)
         self.assertEqual(exit_reason, NodeExitReason.OOM)
+
         state.terminated = client.V1ContainerStateTerminated(exit_code=137)
         exit_reason = _get_pod_exit_reason(pod)
         self.assertEqual(exit_reason, NodeExitReason.KILLED)
+
         state.terminated = client.V1ContainerStateTerminated(exit_code=1)
         exit_reason = _get_pod_exit_reason(pod)
         self.assertEqual(exit_reason, NodeExitReason.FATAL_ERROR)
+
+        state.terminated = client.V1ContainerStateTerminated(exit_code=201)
+        exit_reason = _get_pod_exit_reason(pod)
+        self.assertEqual(exit_reason, NodeExitReason.HARDWARE_ERROR)
+
+        state.terminated = client.V1ContainerStateTerminated(exit_code=202)
+        exit_reason = _get_pod_exit_reason(pod)
+        self.assertEqual(exit_reason, NodeExitReason.HARDWARE_ERROR)
+
+        state.terminated = client.V1ContainerStateTerminated(exit_code=0)
+        exit_reason = _get_pod_exit_reason(pod)
+        self.assertEqual(exit_reason, NodeExitReason.Succeeded)
+
+        state.terminated = client.V1ContainerStateTerminated(exit_code=999)
+        exit_reason = _get_pod_exit_reason(pod)
+        self.assertEqual(exit_reason, NodeExitReason.UNKNOWN_ERROR)
 
     def test_verify_restarting_training(self):
         labels = _mock_pod_labels()
@@ -205,4 +229,57 @@ class ScalePlanWatcherTest(unittest.TestCase):
         self.assertEqual(
             resource_plan.node_resources["elasticjob_sample-worker-0"].memory,
             1024,
+        )
+
+
+class K8sElasticJobWatcherTest(unittest.TestCase):
+    def setUp(self):
+        mock_k8s_client()
+        self.watcher = K8sElasticJobWatcher(JobArgs("k8s", "default", "test"))
+
+    def test_watch_modified_event_suspend(self):
+        # 模拟事件流
+        event_stream = [
+            {
+                "type": "MODIFIED",
+                "object": {
+                    "metadata": {"name": "test"},
+                    "spec": {"suspend": True},
+                },
+            }
+        ]
+
+        self.watcher._job_context.update_job_stage(JobStage.JOB_INIT)
+        with patch("kubernetes.watch.Watch") as mock_watch:
+            mock_watch.return_value.stream.return_value = iter(event_stream)
+            self.watcher.start()
+
+        time.sleep(10)
+
+        self.assertIn(
+            self.watcher._job_context.get_job_stage(),
+            "suspended, stopped, stopping",
+        )
+
+    def test_watch_added_event_unsuspend(self):
+        event_stream = [
+            {
+                "type": "ADDED",
+                "object": {
+                    "metadata": {"name": "test"},
+                    "spec": {"suspend": False},
+                },
+            }
+        ]
+
+        self.watcher._job_context.update_job_stage(JobStage.JOB_INIT)
+        with patch("kubernetes.watch.Watch") as mock_watch:
+            mock_watch.return_value.stream.return_value = iter(event_stream)
+            self.watcher.start()
+
+        time.sleep(10)
+
+        self.assertEqual(
+            self.watcher._job_context.is_suspended(),
+            False,
         )

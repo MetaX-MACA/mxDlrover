@@ -154,8 +154,8 @@ const (
 	// The training has failed its execution.
 	JobFailed JobConditionType = "Failed"
 
-	// JobScaling means the job is scaling up/down its Pods.
-	JobScaling JobConditionType = "Scaling"
+	// JobSuspended means the job has been suspended.
+	JobSuspended JobConditionType = "Suspended"
 )
 
 // +k8s:openapi-gen=true

@@ -170,12 +170,9 @@ class RayElasticJob(ElasticJob):
 
 
 class RayJobArgs(JobArgs):
-    def __init__(self, platform, namespace, job_name, folder_path=None):
+    def __init__(self, platform, namespace, job_name):
         super(RayJobArgs, self).__init__(platform, namespace, job_name)
         self.file_path = "{}.json".format(job_name)
-        if folder_path is None or not os.path.exists(folder_path):
-            folder_path = os.path.dirname(os.path.dirname(__file__))
-        self.file_path = os.path.join(folder_path, "tests/test.json")
         self.stats_backend = LocalFileStateBackend(self.file_path)
 
     def initilize(self):

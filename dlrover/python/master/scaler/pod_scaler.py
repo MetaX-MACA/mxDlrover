@@ -20,7 +20,7 @@ import telnetlib
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Deque, Dict, List, Optional
 
 from kubernetes import client
@@ -29,14 +29,16 @@ from kubernetes.client import V1EnvVar, V1EnvVarSource, V1ObjectFieldSelector
 from dlrover.python.common.constants import (
     DistributionStrategy,
     ElasticJobLabel,
-    ErrorMonitorConstants,
+    EventReportConstants,
     NodeEnv,
     NodeStatus,
     NodeType,
 )
+from dlrover.python.common.event.reporter import get_event_reporter
 from dlrover.python.common.global_context import Context
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import Node, NodeResource
+from dlrover.python.master.node.job_context import get_job_context
 from dlrover.python.master.scaler.base_scaler import ScalePlan, Scaler
 from dlrover.python.master.dragonfly.dragonfly_topo_v2 import DragonflyV2TopoManager
 from dlrover.python.scheduler.kubernetes import (
@@ -51,6 +53,7 @@ from dlrover.python.scheduler.kubernetes import (
 )
 
 _dlrover_context = Context.singleton_instance()
+_job_context = get_job_context()
 
 
 class FakeKubeResponse:
@@ -87,7 +90,7 @@ class PodScaler(Scaler):
     in a queue.
     """
 
-    def __init__(self, job_name, namespace, error_monitor=None):
+    def __init__(self, job_name, namespace):
         super(PodScaler, self).__init__(job_name)
         self._k8s_client = k8sClient.singleton_instance(namespace)
         self._topo_manager = DragonflyV2TopoManager.singleton_instance(namespace, job_name)
@@ -95,6 +98,7 @@ class PodScaler(Scaler):
         self._namespace = namespace
         self._replica_template: Dict[str, client.V1Pod] = {}
         self._create_node_queue: Deque[Node] = deque()
+        self._create_node_futures: List[Future] = []
         self._scaling_lock = threading.Lock()
         self._plan = ScalePlan()
         self._ps_addrs: List[str] = []
@@ -104,8 +108,10 @@ class PodScaler(Scaler):
         self._job_uid = ""
         self.api_client = client.ApiClient()
         self._master_addr = ""
-        self._error_monitor = error_monitor
+        self._master_service_type = _dlrover_context.master_service_type
+        self._event_reporter = get_event_reporter()
         self._started = False
+        self._job_context = get_job_context()
 
     def start(self):
         self._job = self._retry_to_get_job()
@@ -211,15 +217,33 @@ class PodScaler(Scaler):
             )
             return
 
-        self._remove_nodes(plan)
         while True:
-            if len(self._create_node_queue) > 0:
+            if not self._job_context.is_suspended():
+                break
+            logger.info("Waiting for elasticJob which is suspended")
+            time.sleep(5)
+
+        self._remove_nodes(plan)
+        while self._started:
+            if (
+                len(self._create_node_queue) > 0
+                and not _job_context.is_request_stopped()
+            ):
                 logger.info(
                     f"Wait nodes {self._create_node_queue} to completed."
                 )
                 time.sleep(15)
             else:
-                break
+                if all(future.done() for future in self._create_node_futures):
+                    # wait async pod creation completed
+                    logger.debug("Async pod creation finished.")
+                    time.sleep(5)
+                    break
+                else:
+                    logger.debug("Waiting for async pod creation...")
+                    time.sleep(5)
+                    continue
+
         with self._scaling_lock:
             if plan.empty():
                 return
@@ -422,9 +446,11 @@ class PodScaler(Scaler):
         with ThreadPoolExecutor(max_workers=4) as executor:
             while self._started:
                 while self._create_node_queue:
-                    executor.submit(
-                        self._create_pod_from_queue,
-                        self._create_node_queue.popleft(),
+                    self._create_node_futures.append(
+                        executor.submit(
+                            self._create_pod_from_queue,
+                            self._create_node_queue.popleft(),
+                        )
                     )
                 time.sleep(3)
 
@@ -443,15 +469,23 @@ class PodScaler(Scaler):
             return True
 
         succeed = False
-        if self._check_cluster_ready_for_pod(node_from_queue):
-            pod = self._create_pod(node_from_queue)
-            succeed = self._k8s_client.create_pod(pod)
-        if not succeed:
-            self._create_node_queue.appendleft(node_from_queue)
-        else:
-            # create svs for succeed pod
-            if not self._create_service_for_pod(node_from_queue):
+
+        try:
+            if self._check_cluster_ready_for_pod(node_from_queue):
+                pod = self._create_pod(node_from_queue)
+                succeed = self._k8s_client.create_pod(pod)
+            if not succeed:
                 self._create_node_queue.appendleft(node_from_queue)
+            else:
+                # create svs for succeed pod
+                if not self._create_service_for_pod(node_from_queue):
+                    self._create_node_queue.appendleft(node_from_queue)
+        except Exception as e:
+            logger.error(
+                f"Failed to create pod by unexpected error: {e}", exc_info=True
+            )
+            succeed = False
+
         return succeed
 
     def _check_cluster_ready_for_pod(self, node: Node):
@@ -503,6 +537,7 @@ class PodScaler(Scaler):
 
         # Deprecated env vars
         env.append(V1EnvVar(name=NodeEnv.WORKER_TYPE, value=node.type))
+
         env.append(V1EnvVar(name=NodeEnv.WORKER_ID, value=str(node.id)))
         env.append(V1EnvVar(name=NodeEnv.WORKER_NUM, value=str(worker_num)))
         env.append(
@@ -510,6 +545,12 @@ class PodScaler(Scaler):
         )
         env.append(
             V1EnvVar(name=NodeEnv.DLROVER_MASTER_ADDR, value=self._master_addr)
+        )
+        env.append(
+            V1EnvVar(
+                name=NodeEnv.DLROVER_MASTER_SERVICE_TYPE,
+                value=self._master_service_type,
+            )
         )
 
         env.append(
@@ -559,11 +600,11 @@ class PodScaler(Scaler):
             V1EnvVar(name=NodeEnv.MONITOR_ENABLED, value="true")
         )
         self._patch_tf_config_into_env(pod, node)
-        if self._error_monitor:
-            self._error_monitor.report_event(
-                ErrorMonitorConstants.TYPE_INFO,
+        if self._event_reporter:
+            self._event_reporter.report(
+                EventReportConstants.TYPE_INFO,
                 pod_name,
-                ErrorMonitorConstants.ACTION_WORKER_CREATE,
+                EventReportConstants.ACTION_WORKER_CREATE,
                 "",
                 {},
             )

@@ -28,7 +28,8 @@ from dlrover.python.common.log import default_logger as logger
 from dlrover.python.master.elastic_training.rdzv_manager import (
     RendezvousManager,
 )
-from dlrover.python.master.monitor.speed_monitor import SpeedMonitor
+from dlrover.python.master.monitor.perf_monitor import PerfMonitor
+from dlrover.python.master.node.job_context import get_job_context
 from dlrover.python.master.watcher.base_watcher import Node
 
 _dlrover_ctx = Context.singleton_instance()
@@ -53,9 +54,8 @@ class NodeEventCallback(metaclass=abc.ABCMeta):
                 func(self, *args, **kwargs)
             except Exception as e:
                 logger.warning(
-                    "Fail to call {}.{} ".format(
-                        self.__class__.__name__, func.__name__
-                    ),
+                    f"Fail to call {self.__class__.__name__}"
+                    f".{func.__name__}",
                     e,
                 )
 
@@ -172,10 +172,10 @@ class TFPSNodeHandlingCallback(NodeEventCallback):
                     reason=JobExitReason.SUCCEEDED,
                     msg="All critical nodes completed",
                 )
-        self._master.speed_monitor.reduce_target_worker_num(
+        self._master.perf_monitor.reduce_target_worker_num(
             [(node.type, node.id)]
         )
-        self._master.speed_monitor.remove_running_worker(node.type, node.id)
+        self._master.perf_monitor.remove_running_worker(node.type, node.id)
         self._master.sync_service.remove_exited_worker_sync(node.type, node.id)
 
     @NodeEventCallback.log_callback_exception
@@ -185,10 +185,10 @@ class TFPSNodeHandlingCallback(NodeEventCallback):
         if node.type == NodeType.PS:
             self._master.elastic_ps_service.inc_global_cluster_version()
         if node.is_unrecoverable_failure():
-            self._master.speed_monitor.reduce_target_worker_num(
+            self._master.perf_monitor.reduce_target_worker_num(
                 [(node.type, node.id)]
             )
-        self._master.speed_monitor.remove_running_worker(node.type, node.id)
+        self._master.perf_monitor.remove_running_worker(node.type, node.id)
         self._master.sync_service.remove_exited_worker_sync(node.type, node.id)
 
     @NodeEventCallback.log_callback_exception
@@ -197,7 +197,7 @@ class TFPSNodeHandlingCallback(NodeEventCallback):
         self._stop_job_if_needed(node)
         if node.type == NodeType.PS:
             self._master.elastic_ps_service.inc_global_cluster_version()
-        self._master.speed_monitor.remove_running_worker(node.type, node.id)
+        self._master.perf_monitor.remove_running_worker(node.type, node.id)
         self._master.sync_service.remove_exited_worker_sync(node.type, node.id)
 
     def _stop_job_if_needed(self, node: Node):
@@ -207,10 +207,8 @@ class TFPSNodeHandlingCallback(NodeEventCallback):
                 success=False,
                 reason=job_exit_reason,
                 msg=(
-                    "Critical node (type={}, id={}) is failed "
-                    "and {}.".format(
-                        node.type, node.id, node.unrecoverable_failure_msg
-                    )
+                    f"Critical node(type={node.type}, id={node.id}) is failed "
+                    f"and reason is {node.get_unrecoverable_failure_msg()}."
                 ),
             )
 
@@ -219,20 +217,18 @@ class AllReduceNodeHandlingCallback(NodeEventCallback):
     def __init__(self, master):
         super(AllReduceNodeHandlingCallback, self).__init__()
         self._master = master
-        self._speed_monitor: SpeedMonitor = self._master.speed_monitor
+        self._perf_monitor: PerfMonitor = self._master.perf_monitor
         self._rdzv_managers: Dict[
             str, RendezvousManager
         ] = self._master.rdzv_managers
-        rdzv_manager = self._rdzv_managers.get(
-            RendezvousName.ELASTIC_TRAINING, None
-        )
+        rdzv_manager = self._rdzv_managers.get(RendezvousName.TRAINING, None)
         if rdzv_manager:
             self._min_node = rdzv_manager.get_min_nodes()
         else:
             self._min_node = sys.maxsize
-        self._failed_worker_count = 0
         self._total_worker_num = self._master.job_manager.get_worker_num()
         self._available_worker_num = self._total_worker_num
+        self._job_context = get_job_context()
 
     def get_job_exit_reason(self, node: Node):
         if self._master.task_manager.training_started():
@@ -265,16 +261,16 @@ class AllReduceNodeHandlingCallback(NodeEventCallback):
                     reason=JobExitReason.SUCCEEDED,
                     msg="All critical nodes completed",
                 )
-        self._speed_monitor.remove_running_worker(node.type, node.id)
+        self._perf_monitor.remove_running_worker(node.type, node.id)
         self._remove_node_from_rdzv(node)
 
     @NodeEventCallback.log_callback_exception
     def on_node_failed(self, node: Node, cluster_context):
         node.finish_time = datetime.now()  # type: ignore
-        self._failed_worker_count += 1
+        self._job_context.report_failed_node(node.id)
         self._stop_job_if_needed(node)
         if node.is_unrecoverable_failure():
-            self._master.speed_monitor.reduce_target_worker_num(
+            self._master.perf_monitor.reduce_target_worker_num(
                 [(node.type, node.id)]
             )
         if node.exit_reason == NodeExitReason.HARDWARE_ERROR:
@@ -282,7 +278,7 @@ class AllReduceNodeHandlingCallback(NodeEventCallback):
                 node.type,
                 node.id,
                 error_data=NodeExitReason.HARDWARE_ERROR,
-                level=TrainingExceptionLevel.NODE_ERROR,
+                level=TrainingExceptionLevel.ERROR,
             )
         self._remove_node_from_rdzv(node)
 
@@ -321,13 +317,11 @@ class AllReduceNodeHandlingCallback(NodeEventCallback):
                 success=False,
                 reason=job_exit_reason,
                 msg=(
-                    "Critical node (type={}, id={}) is failed "
-                    "and {}".format(
-                        node.type, node.id, node.unrecoverable_failure_msg
-                    )
+                    f"Critical node(type={node.type}, id={node.id}) is failed "
+                    f"and reason is {node.get_unrecoverable_failure_msg()}"
                 ),
             )
-        elif self._failed_worker_count >= max_failure_num:
+        elif self._job_context.get_failed_node_cnt() >= max_failure_num:
             # The job early stops if there are a lot of failed workers.
             self._master.request_stop(
                 success=False,

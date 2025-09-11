@@ -67,22 +67,6 @@ class TestDiagnosisAgent(unittest.TestCase):
         os.environ.update(self.env_back)
         self._master.stop()
 
-    def test_diagnose_agent(self):
-        agent = DiagnosisAgent.singleton_instance()
-        agent.stop()
-
-        agent._accumulate_observe_time = 0
-        problems = agent._get_observe_problems()
-        self.assertEqual(len(problems), 0)
-
-        agent._accumulate_observe_time = 30
-        problems = agent._get_observe_problems()
-        self.assertEqual(len(problems), 1)
-
-        agent._accumulate_observe_time = 60
-        problems = agent._get_observe_problems()
-        self.assertEqual(len(problems), 2)
-
     def test_diagnose_training(self):
         file = "data/training.log"
         path = os.path.dirname(__file__)
@@ -95,7 +79,7 @@ class TestDiagnosisAgent(unittest.TestCase):
 
         spec = _create_worker_spec(
             node_rank=0,
-            rdzv_name=RendezvousName.ELASTIC_TRAINING,
+            rdzv_name=RendezvousName.TRAINING,
             config=self.config,
             entrypoint="echo",
             args=[],
@@ -191,7 +175,9 @@ class TestDiagnosisAgent(unittest.TestCase):
 
         agent._client.report_heart_beat = mock.MagicMock(
             returnValue=NodeAction(
-                action_type=DiagnosisActionType.RESTART_WORKER
+                node_id=0,
+                node_type="worker",
+                action_type=DiagnosisActionType.RESTART_WORKER,
             )
         )
         agent.send_heartbeat()
@@ -210,23 +196,19 @@ class TestDiagnosisAgent(unittest.TestCase):
         )
 
     def test_async_thread(self):
-        DiagnosisConstant.AGENT_PERIODICALLY_DIAGNOSIS_INTERVAL_SECS = 1
         DiagnosisConstant.AGENT_PERIODICALLY_REPORT_INTERVAL_SECS = 1
         agent = DiagnosisAgent("", "")
         active_threads_name = [t.name for t in threading.enumerate()]
-        self.assertIn("periodically_diagnostician", active_threads_name)
         self.assertIn("periodically_reporter", active_threads_name)
 
         agent.stop()
         time.sleep(2)
         active_threads_name = [t.name for t in threading.enumerate()]
-        self.assertNotIn("periodically_diagnostician", active_threads_name)
         self.assertNotIn("periodically_reporter", active_threads_name)
 
         agent.start()
         time.sleep(2)
         active_threads_name = [t.name for t in threading.enumerate()]
-        self.assertIn("periodically_diagnostician", active_threads_name)
         self.assertIn("periodically_reporter", active_threads_name)
 
         agent.stop()

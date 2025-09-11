@@ -27,6 +27,7 @@ from dlrover.python.common.constants import (
     OptimizeMode,
     k8sAPIExceptionReason,
 )
+from dlrover.python.common.global_context import Context
 from dlrover.python.common.log import default_logger as logger
 from dlrover.python.common.node import NodeGroupResource, NodeResource
 from dlrover.python.common.singleton import Singleton
@@ -43,6 +44,8 @@ NODE_SERVICE_PORTS = {
 
 JOB_SUFFIX = "-edljob-"
 USER_AGENT = "dlrover/29.0.0/python"
+
+_dlrover_context = Context.singleton_instance()
 
 
 def convert_memory_to_mb(memory: str):
@@ -424,6 +427,7 @@ class K8sJobArgs(JobArgs):
         self.optimize_mode = job["spec"].get(
             "optimizeMode", OptimizeMode.SINGLE_JOB
         )
+        self.enable_suspended = job["spec"].get("suspended", False)
 
         for replica, spec in job["spec"]["replicaSpecs"].items():
             if replica == NodeType.WORKER:
@@ -468,6 +472,7 @@ class K8sJobArgs(JobArgs):
                 restart_count,
                 restart_timeout,
                 critical_nodes,
+                _dlrover_context.seconds_to_timeout_task_process,
             )
         logger.info("Job args = %s", self.__dict__)
 

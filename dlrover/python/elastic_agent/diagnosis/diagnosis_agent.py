@@ -15,8 +15,8 @@ import json
 import threading
 import time
 from datetime import datetime
-from typing import Dict, List
 
+from dlrover.python.common import env_utils
 from dlrover.python.common.constants import TrainingExceptionLevel
 from dlrover.python.common.error import ProcessError
 from dlrover.python.common.log import default_logger as logger
@@ -24,73 +24,73 @@ from dlrover.python.common.singleton import Singleton
 from dlrover.python.diagnosis.common.constants import (
     DiagnosisActionType,
     DiagnosisConstant,
-    InferenceConfigKey,
+    DiagnosisErrorConstant,
 )
 from dlrover.python.diagnosis.common.diagnosis_action import (
     DiagnosisAction,
-    NoAction,
     NodeAction,
 )
 from dlrover.python.diagnosis.common.diagnosis_data import WorkerTrainingMetric
-from dlrover.python.diagnosis.common.inference_chain import (
-    Inference,
-    InferenceAttribute,
-    InferenceDescription,
-    InferenceName,
-    combine_inferences,
-    is_inference_included,
+from dlrover.python.diagnosis.common.diagnosis_manager import DiagnosisManager
+from dlrover.python.diagnosis.datacollector.atorch_event_collector import (
+    AtorchEventCollector,
 )
-from dlrover.python.diagnosis.inferencechain.coordinator import (
-    coordinate_solutions,
+from dlrover.python.diagnosis.datacollector.resource_collector import (
+    ResourceCollector,
 )
-from dlrover.python.diagnosis.inferencechain.inference_chain import (
-    InferenceChain,
+from dlrover.python.diagnosis.datacollector.xpu_timer_metric_collector import (
+    XpuTimerMetricsCollector,
 )
-from dlrover.python.diagnosis.inferencechain.inferenceoperator.operator import (  # noqa: E501
-    get_training_failure_operators,
-    get_worker_observe_operators,
-    get_worker_resolve_operators,
+from dlrover.python.diagnosis.diagnostician.failure_node_diagnostician import (
+    FailureNodeDiagnostician,
+)
+from dlrover.python.diagnosis.diagnostician.resource_collect_error_diagnostician import (  # noqa: E501
+    ResourceCollectErrorDiagnostician,
 )
 from dlrover.python.elastic_agent.context import get_agent_context
 from dlrover.python.elastic_agent.master_client import MasterClient
+from dlrover.python.training_event.config import is_dlrover_event_enabled
 
 
-class DiagnosisAgent(Singleton):
+class DiagnosisAgent(Singleton, DiagnosisManager):
     def __init__(
         self,
         training_log_file="",
         errors="",
-        rank=-1,
+        node_rank=-1,
+        local_world_size=0,
     ):
         self._client = MasterClient.singleton_instance()
         self._training_log_file = training_log_file
         self._errors = errors
         self._stopped = False
-        # The key is the time interval in seconds
-        self._observe_problems: Dict[int, List[Inference]] = {
-            30: [
-                Inference(
-                    name=InferenceName.WORKER,
-                    attribution=InferenceAttribute.COLLECT,
-                    description=InferenceDescription.RESOURCE,
-                ),
-            ],
-            60: [
-                Inference(
-                    name=InferenceName.WORKER,
-                    attribution=InferenceAttribute.COLLECT,
-                    description=InferenceDescription.METRICS,
-                ),
-            ],
-        }
-        self._accumulate_observe_time = 0
-
-        self._observe_operators = get_worker_observe_operators()
-        self._diagnosis_operators = get_worker_resolve_operators()
         self._agent_context = get_agent_context()
-        self._diagnosis_thread = None
+
+        DiagnosisManager.__init__(self, self._agent_context)
+        # register diagnostician
+        self.register_diagnostician(
+            DiagnosisErrorConstant.NODE_FAILED, FailureNodeDiagnostician()
+        )
+        self.register_diagnostician(
+            DiagnosisErrorConstant.RESOURCE_COLLECT_ERROR,
+            ResourceCollectErrorDiagnostician(),
+        )
+
+        # register periodical diagnosis
+        self.register_periodical_diagnosis(
+            DiagnosisErrorConstant.RESOURCE_COLLECT_ERROR, 30
+        )
+
+        # register periodical data collector
+        self.register_periodical_data_collector(XpuTimerMetricsCollector(), 60)
+        self.register_periodical_data_collector(ResourceCollector(), 30)
+
         self._report_thread = None
-        self._rank = rank
+        self._node_rank = node_rank
+        self._local_world_size = local_world_size
+        self._atorch_collector = AtorchEventCollector(
+            local_world_size=local_world_size, retry_timeout=30
+        )
 
         self.start()
 
@@ -105,21 +105,19 @@ class DiagnosisAgent(Singleton):
     ):
         if len(training_log_file) > 0:
             self._training_log_file = training_log_file
+            logger.info(f"Update training_log_file: {training_log_file}")
         if len(errors) > 0:
             self._errors = errors
+            logger.info(f"Update errors: {errors}")
         if rank >= 0:
-            self._rank = rank
+            self._node_rank = rank
+            logger.info(f"Update rank: {rank}")
 
     def start(self):
-        self._stopped = False
+        self.start_diagnosis()
+        self.start_data_collection()
 
-        # start a async thread to diagnose periodically
-        self._diagnosis_thread = threading.Thread(
-            target=self._periodically_diagnosis,
-            name="periodically_diagnostician",
-            daemon=True,
-        )
-        self._diagnosis_thread.start()
+        self._stopped = False
 
         self._report_thread = threading.Thread(
             target=self._periodically_report,
@@ -128,136 +126,55 @@ class DiagnosisAgent(Singleton):
         )
         self._report_thread.start()
 
+        if is_dlrover_event_enabled():
+            self._atorch_collector.start_collectors()
+
     def stop(self):
         self._stopped = True
+        if is_dlrover_event_enabled():
+            self._atorch_collector.stop_collectors()
 
-    def _get_observe_problems(self) -> List[Inference]:
-        observe_problems: List[Inference] = []
-        for time_period, infs in self._observe_problems.items():
-            if (
-                self._accumulate_observe_time > 0
-                and self._accumulate_observe_time % time_period == 0
-            ):
-                observe_problems = observe_problems + infs
-        return observe_problems
-
-    def diagnose_problems(self, problems: List[Inference]) -> DiagnosisAction:
-        conclusions: List[Inference] = []
-        for problem in problems:
-            if problem.configs is None:
-                problem.configs = {}
-            problem.configs[InferenceConfigKey.RANK] = str(self._rank)
-            ic = InferenceChain([problem], self._diagnosis_operators)
-            try:
-                infs = ic.infer()
-                if len(infs) > 0:
-                    conclusions = combine_inferences(conclusions, infs)
-            except Exception as e:
-                logger.error(f"fail to diagnose observation {problem}: {e}")
-        return coordinate_solutions(conclusions)
-
-    def _observe(self, observe_problems: List[Inference]) -> List[Inference]:
-        observations: List[Inference] = []
-        for problem in observe_problems:
-            ic = InferenceChain([problem], self._observe_operators)
-            try:
-                infs = ic.infer()
-                if len(infs) > 0:
-                    observations = combine_inferences(observations, infs)
-            except Exception as e:
-                logger.error(f"fail to observe problem {problem}: {e}")
-        new_obs: List[Inference] = []
-        for ob in observations:
-            if not is_inference_included(observe_problems, ob):
-                new_obs.append(ob)
-        return new_obs
-
-    def _diagnose_observations(
-        self, observations: List[Inference]
-    ) -> DiagnosisAction:
-        if len(observations) == 0:
-            return NoAction()
-        conclusions: List[Inference] = []
-        for ob in observations:
-            ic = InferenceChain([ob], self._diagnosis_operators)
-            try:
-                infs = ic.infer()
-                if len(infs) > 0:
-                    conclusions = combine_inferences(conclusions, infs)
-            except Exception as e:
-                logger.error(f"fail to diagnose observation {ob}: {e}")
-        return coordinate_solutions(conclusions)
-
-    def _periodically_diagnosis(self):
-        logger.info("Start periodically diagnosis...")
-        while True:
-            if self._stopped:
-                logger.info("Stop periodically diagnosis.")
-                break
-            observe_problems = self._get_observe_problems()
-
-            observations = self._observe(observe_problems)
-            if len(observations) > 0:
-                logger.debug(f"Observed problems: {observations}")
-                action = self.diagnose_problems(observations)
-                if not isinstance(action, NoAction):
-                    self._agent_context.enqueue_diagnosis_action(action)
-            if self._accumulate_observe_time > 600:
-                self._accumulate_observe_time = 0
-
-            time.sleep(
-                DiagnosisConstant.AGENT_PERIODICALLY_DIAGNOSIS_INTERVAL_SECS
-            )
-            self._accumulate_observe_time += (
-                DiagnosisConstant.AGENT_PERIODICALLY_DIAGNOSIS_INTERVAL_SECS
-            )
-
-    def diagnose_training_failure(self) -> NodeAction:
+    def diagnose_training_failure(self) -> DiagnosisAction:
         self._report_failure_to_master(
             self._agent_context.run_result.failures,
             self._agent_context.restart_count,
         )
-        # check if the node is failed
-        inference = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.ISORNOT,
-            description=InferenceDescription.FAILURE,
-            configs={
-                InferenceConfigKey.LOG_FILE: self._training_log_file,
-                InferenceConfigKey.ERRORS: self._errors,
-            },
+        ob = self.observe(
+            DiagnosisErrorConstant.NODE_FAILED,
+            log_file=self._training_log_file,
+            errors=self._errors,
         )
-        ic = InferenceChain([inference], get_training_failure_operators())
-        infer_results = ic.infer()
-        failure_inf = Inference(
-            name=InferenceName.NODE,
-            attribution=InferenceAttribute.IS,
-            description=InferenceDescription.FAILURE,
-        )
-        failure_node = is_inference_included(infer_results, failure_inf)
 
-        if self._agent_context.remaining_failovers > 0 and not failure_node:
+        node_failed = ob.observation == DiagnosisErrorConstant.NODE_FAILED
+
+        if self._agent_context.remaining_failovers > 0 and not node_failed:
             logger.info(
                 f"[{self._agent_context.worker_spec.role}] Worker group "
                 f"{self._agent_context.run_result.state.name}, "
-                f"is failure node: {failure_node},"
+                f"is failure node: {node_failed},"
                 f"{self._agent_context.remaining_failovers}/"
                 f"{self._agent_context.worker_spec.max_restarts} "
                 f"attempts left; will restart worker group."
             )
             return NodeAction(
+                node_id=env_utils.get_node_id(),
+                node_type=env_utils.get_node_type(),
+                instance=DiagnosisConstant.LOCAL_INSTANCE,
                 action_type=DiagnosisActionType.RESTART_WORKER,
             )
         else:
             logger.info(
                 f"[{self._agent_context.worker_spec.role}] Worker group "
                 f"{self._agent_context.run_result.state.name}, "
-                f"is failure node: {failure_node}, "
+                f"is failure node: {node_failed}, "
                 f"no attempts("
                 f"{self._agent_context.worker_spec.max_restarts}) "
                 "left; will relaunch."
             )
             return NodeAction(
+                node_id=env_utils.get_node_id(),
+                node_type=env_utils.get_node_type(),
+                instance=DiagnosisConstant.LOCAL_INSTANCE,
                 action_type=DiagnosisActionType.RELAUNCH_WORKER,
             )
 

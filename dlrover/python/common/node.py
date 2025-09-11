@@ -13,7 +13,10 @@
 
 import copy
 import time
+from datetime import datetime
+from typing import Tuple
 
+from dlrover.python.common.comm import ParallelConfig
 from dlrover.python.common.constants import (
     NodeEventType,
     NodeExitReason,
@@ -21,7 +24,7 @@ from dlrover.python.common.constants import (
     NodeStatus,
     PriorityClass,
 )
-from dlrover.python.common.grpc import ParallelConfig
+from dlrover.python.common.resource import Resource
 from dlrover.python.common.serialize import JsonSerializable
 
 
@@ -121,6 +124,12 @@ class NodeResource(JsonSerializable):
                 gpu_num = int(resource[key])
         return NodeResource(cpu, memory, gpu_type, gpu_num)
 
+    @classmethod
+    def resource_to_node_resource(cls, resource: Resource):
+        return NodeResource(
+            resource.cpu, resource.memory, resource.gpu_type, resource.gpu
+        )
+
 
 class NodeGroupResource(JsonSerializable):
     """The node group resource contains the number of the task
@@ -217,7 +226,7 @@ class Node(object):
         self.migrated = False
         self.unrecoverable_failure_msg = ""
         self.heartbeat_time = 0
-        self.reported_status: str = ""
+        self.reported_status: Tuple = ("", 0)
 
     def exited(self):
         return self.status in [
@@ -278,7 +287,7 @@ class Node(object):
         new_node.is_released = False
         new_node.relaunchable = True
         new_node.init_time = time.time()
-        new_node.reported_status = ""
+        new_node.reported_status = ("", 0)
         return new_node
 
     def is_unrecoverable_failure(self):
@@ -349,36 +358,39 @@ class Node(object):
         # no updating if already exited(succeeded or failed)
         if self.is_exited_reported():
             return
-        self.reported_status = status
+        now = int(datetime.now().timestamp())
+        self.reported_status = (status, now)
+
+    def get_reported_status(self):
+        return self.reported_status[0]
 
     def is_exited_reported(self):
         return (
-            self.reported_status == NodeEventType.SUCCEEDED_EXITED
-            or self.reported_status == NodeEventType.FAILED_EXITED
+            self.reported_status[0] == NodeEventType.SUCCEEDED_EXITED
+            or self.reported_status[0] == NodeEventType.FAILED_EXITED
         )
 
     def is_succeeded_and_exited(self) -> bool:
-        return self.reported_status == NodeEventType.SUCCEEDED_EXITED
+        return self.reported_status[0] == NodeEventType.SUCCEEDED_EXITED
 
     def is_failed_and_exited(self) -> bool:
-        return self.reported_status == NodeEventType.FAILED_EXITED
+        return self.reported_status[0] == NodeEventType.FAILED_EXITED
 
     def is_node_check_failed(self):
-        return self.reported_status == NodeEventType.NODE_CHECK_FAILED
+        return self.reported_status[0] == NodeEventType.NODE_CHECK_FAILED
 
-    def is_resource_scalable(self):
-        """
-        This is a temp implement:
-            resource is not scalable if resource has gpu
-        """
-
-        if self.config_resource.gpu_num > 0:
-            return False
-        return True
+    def get_unrecoverable_failure_msg(self):
+        if self.unrecoverable_failure_msg:
+            return self.unrecoverable_failure_msg
+        else:
+            if self.critical:
+                return "critical worker"
+            return "unknown"
 
     def __repr__(self):
         return (
             f"name:{self.name};"
+            f"create:{self.create_time};"
             f"rank_index:{self.rank_index};"
             f"type:{self.type};"
             f"status:{self.status};"
@@ -399,3 +411,26 @@ class Node(object):
         if self == node:
             return
         self.__dict__.update(node.__dict__)
+
+    def get_name(self):
+        if self.name is None:
+            return f"{self.id}"
+        else:
+            return self.name
+
+
+class NodeEvent(object):
+    """NodeEvent is the event to change the status of a Node"""
+
+    def __init__(self, event_type, node):
+        self.event_type = event_type
+        self.node: Node = node
+
+    def is_node_check_event(self):
+        return (
+            self.event_type == NodeEventType.NODE_CHECK_SUCCEEDED
+            or self.event_type == NodeEventType.NODE_CHECK_FAILED
+        )
+
+    def is_pre_check_event(self):
+        return self.event_type == NodeEventType.WAIT_PRE_CHECK

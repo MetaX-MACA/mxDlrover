@@ -1,5 +1,4 @@
-# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
-# Copyright 2022 The DLRover Authors. All rights reserved.
+# Copyright 2025 The DLRover Authors. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,6 +12,9 @@
 # limitations under the License.
 
 import json
+import threading
+from datetime import datetime
+from time import sleep
 from typing import List
 
 from kubernetes import client, watch
@@ -21,20 +23,31 @@ from dlrover.python.common.constants import (
     ElasticJobApi,
     ElasticJobLabel,
     ExitCode,
+    JobConstant,
+    JobStage,
+    NodeEventType,
     NodeExitReason,
     NodeStatus,
     NodeType,
     ScalePlanLabel,
 )
 from dlrover.python.common.log import default_logger as logger
-from dlrover.python.common.node import Node, NodeGroupResource, NodeResource
+from dlrover.python.common.node import (
+    Node,
+    NodeEvent,
+    NodeGroupResource,
+    NodeResource,
+)
+from dlrover.python.master.node.job_context import JobContext, get_job_context
 from dlrover.python.master.resource.optimizer import ResourcePlan
-from dlrover.python.master.watcher.base_watcher import NodeEvent, NodeWatcher
+from dlrover.python.master.watcher.base_watcher import NodeWatcher
 from dlrover.python.scheduler.kubernetes import (
     convert_cpu_to_decimal,
     convert_memory_to_mb,
     k8sClient,
 )
+
+job_ctx = get_job_context()
 
 
 def _get_start_timestamp(pod_status_obj):
@@ -65,32 +78,35 @@ def _get_pod_exit_reason(pod):
             ExitCode.CORE_DUMP_ERROR_CODE,
         ):
             return NodeExitReason.FATAL_ERROR
+        elif exit_code in (
+            ExitCode.GPU_DRIVER_ERROR,
+            ExitCode.GPU_POD_RESIDUE,
+            ExitCode.GPU_INFOROM_CORRUPTED,
+        ):
+            logger.info(
+                "Possible error found in GPU. Will relaunch this node."
+            )
+            return NodeExitReason.HARDWARE_ERROR
+        elif exit_code == 0:
+            return NodeExitReason.Succeeded
         else:
-            if exit_code in (
-                ExitCode.GPU_DRIVER_ERROR,
-                ExitCode.GPU_POD_RESIDUE,
-                ExitCode.GPU_INFOROM_CORRUPTED,
-            ):
-                logger.info(
-                    "Possible error found in GPU. Kill this node and launch a"
-                    " new one."
-                )
-                return NodeExitReason.HARDWARE_ERROR
             return NodeExitReason.UNKNOWN_ERROR
+
+    return ""
 
 
 def _convert_pod_event_to_node_event(event):
-    evt_obj = event.get("object")
+    pod = event.get("object")
     evt_type = event.get("type")
-    if not evt_obj or not evt_type:
+    if not pod or not evt_type:
         logger.error("Event doesn't have object or type: %s" % event)
         return None
 
-    if evt_obj.kind != "Pod":
+    if pod.kind != "Pod":
         # We only care about pod related events
         return None
 
-    metadata: client.V1ObjectMeta = evt_obj.metadata
+    metadata: client.V1ObjectMeta = pod.metadata
 
     # Skip events of dlrover mater Pod
     pod_type = metadata.labels[ElasticJobLabel.REPLICA_TYPE_KEY]
@@ -100,18 +116,23 @@ def _convert_pod_event_to_node_event(event):
     rank = int(metadata.labels[ElasticJobLabel.RANK_INDEX_KEY])
     pod_id = int(metadata.labels[ElasticJobLabel.REPLICA_INDEX_KEY])
     pod_name = metadata.name
-    host_name = evt_obj.spec.node_name
-    host_ip = evt_obj.status.host_ip
+    host_name = pod.spec.node_name
+    host_ip = pod.status.host_ip
 
-    status = evt_obj.status.phase
+    status = pod.status.phase
     if metadata.deletion_timestamp:
         status = NodeStatus.DELETED
 
-    restart = _verify_restarting_training(evt_obj)
-    if restart:
-        logger.info(f"{evt_obj.metadata.name} need to restart.")
+    logger.debug(
+        f"Got monitor event for pod: {pod_name}, "
+        f"node: {host_name}, ip: {host_ip}, status: {status}."
+    )
 
-    resource = _parse_container_resource(evt_obj.spec.containers[0])
+    restart = _verify_restarting_training(pod)
+    if restart:
+        logger.info(f"{pod.metadata.name} need to restart.")
+
+    resource = _parse_container_resource(pod.spec.containers[0])
 
     relaunch_count = int(metadata.labels[ElasticJobLabel.RELAUNCH_COUNT])
     node = Node(
@@ -120,7 +141,7 @@ def _convert_pod_event_to_node_event(event):
         name=pod_name,
         rank_index=rank,
         status=status,
-        start_time=_get_start_timestamp(evt_obj.status),
+        start_time=_get_start_timestamp(pod.status),
         config_resource=resource,
         host_name=host_name,
         host_ip=host_ip,
@@ -128,7 +149,9 @@ def _convert_pod_event_to_node_event(event):
         relaunch_count=relaunch_count,
     )
     node.create_time = metadata.creation_timestamp
-    node.set_exit_reason(_get_pod_exit_reason(evt_obj))
+
+    if NodeStatus.is_terminal_status(status):
+        node.set_exit_reason(_get_pod_exit_reason(pod))
     node_event = NodeEvent(event_type=evt_type, node=node)
     return node_event
 
@@ -226,6 +249,8 @@ class PodWatcher(NodeWatcher):
             task_id = int(metadata.labels[rank_index_key])
             relaunch_count = int(metadata.labels[relaunch_count_key])
             resource = _parse_container_resource(pod.spec.containers[0])
+            host_name = pod.spec.node_name
+            host_ip = pod.status.host_ip
 
             # if pod has 'deletion_timestamp', set as deleted status directly
             # because the deletion has low probability of failure will affect
@@ -244,10 +269,14 @@ class PodWatcher(NodeWatcher):
                 status=status,
                 start_time=start_time,
                 config_resource=resource,
+                host_name=host_name,
+                host_ip=host_ip,
                 restart_training=restart_training,
                 relaunch_count=relaunch_count,
             )
-            node.set_exit_reason(_get_pod_exit_reason(pod))
+
+            if NodeStatus.is_terminal_status(status):
+                node.set_exit_reason(_get_pod_exit_reason(pod))
             nodes.append(node)
 
             # delete pod if pod already succeeded(no need for failed pod,
@@ -255,6 +284,24 @@ class PodWatcher(NodeWatcher):
             if pod.status.phase == NodeStatus.SUCCEEDED:
                 logger.info(f"Delete succeeded pod: {pod_name}")
                 self._k8s_client.delete_pod(pod_name)
+            else:
+                node_type = pod_type
+                node_id = pod_id
+                target_node = job_ctx.job_node(node_type, node_id)
+                now = int(datetime.now().timestamp())
+                if target_node:
+                    status, ts = target_node.reported_status
+                    if (
+                        status == NodeEventType.SUCCEEDED_EXITED
+                        and now - ts
+                        > JobConstant.SUCCEEDED_POD_TERMINATING_TIMEOUT
+                    ):
+                        logger.info(
+                            f"Delete target pod {pod_name} due to "
+                            f"report status {status} from {ts} to {now} "
+                            f"has exceeded 600s"
+                        )
+                        self._k8s_client.delete_pod(pod_name)
 
         return nodes
 
@@ -353,3 +400,70 @@ class K8sScalePlanWatcher:
             name=scale_crd["metadata"]["name"],
             body=scale_crd,
         )
+
+
+class K8sElasticJobWatcher(object):
+    """K8sElasticJobWatcher monitors the Elasticjob CR on the cluster.
+    It nodify the JobContext to update the job status.
+    """
+
+    def __init__(self, args):
+        self._job_name = args.job_name
+        self._namespace = args.namespace
+        self._job_uid = args.job_uuid
+        self._enable_suspended = args.enable_suspended
+        self._k8s_client = k8sClient.singleton_instance(args.namespace)
+        self._job_context = JobContext.singleton_instance()
+        self._job_pre_status = JobStage.JOB_INIT
+
+    def watch(self):
+        w = watch.Watch()
+        api_instance = self._k8s_client.api_instance
+        while True:
+            try:
+                for event in w.stream(
+                    api_instance.list_namespaced_custom_object,
+                    namespace=self._namespace,
+                    group=ElasticJobApi.GROUP,
+                    version=ElasticJobApi.VERION,
+                    plural=ElasticJobApi.ELASTICJOB_PLURAL,
+                    timeout_seconds=60,
+                ):
+                    logger.debug(f"get elasticjob event, {event}")
+                    elasticjob_cr = event.get("object", None)
+                    evt_type = event.get("type")
+                    if (
+                        evt_type == "MODIFIED" or evt_type == "ADDED"
+                    ) and elasticjob_cr["metadata"].get(
+                        "name", ""
+                    ) == self._job_name:
+                        logger.info(f"get elasticjob {evt_type} event")
+
+                        enable_suspended = elasticjob_cr["spec"].get(
+                            "suspend", False
+                        )
+                        if (
+                            enable_suspended
+                            and not self._job_context.is_suspended()
+                        ):
+                            logger.info("try to request suspend")
+                            self._job_context.request_suspend()
+                        if (
+                            not enable_suspended
+                            and self._job_context.is_suspended()
+                        ):
+                            logger.info("try to request unsuspend")
+                            self._job_context.request_unsuspend()
+
+                sleep(5)
+            except Exception as e:
+                logger.warning(e)
+                sleep(5)
+
+    def start(self):
+        if self._enable_suspended:
+            self._job_context.request_suspend()
+
+        threading.Thread(
+            target=self.watch, name="job-watcher", daemon=True
+        ).start()

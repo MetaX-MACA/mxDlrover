@@ -14,6 +14,7 @@
 
 import datetime
 import os
+import random
 import time
 from unittest import mock
 
@@ -22,6 +23,7 @@ from kubernetes import client
 
 import dlrover.python.util.k8s_util as ku
 from dlrover.proto import elastic_training_pb2
+from dlrover.python.common.comm import addr_connected
 from dlrover.python.common.constants import (
     DistributionStrategy,
     ElasticJobLabel,
@@ -29,14 +31,14 @@ from dlrover.python.common.constants import (
     NodeType,
     PlatformType,
 )
-from dlrover.python.common.grpc import addr_connected, find_free_port
 from dlrover.python.common.node import NodeGroupResource, NodeResource
 from dlrover.python.master.local_master import LocalJobMaster
-from dlrover.python.master.monitor.speed_monitor import SpeedMonitor
+from dlrover.python.master.monitor.perf_monitor import PerfMonitor
 from dlrover.python.master.shard.dataset_splitter import new_dataset_splitter
 from dlrover.python.master.shard.task_manager import TaskManager
 from dlrover.python.scheduler.job import JobArgs, LocalJobArgs, NodeArgs
 from dlrover.python.scheduler.kubernetes import k8sClient
+from dlrover.python.util.common_util import find_free_port
 
 WITH_TO_DELETED = "WITH_TO_DELETED"
 
@@ -62,7 +64,7 @@ def _get_training_job(*args, **kwargs):
             job_content = f.read()
     else:
         with open(
-            "dlrover/python/tests/data" "/elasticjob_sample.yaml", "r"
+            "dlrover/python/tests/data/elasticjob_sample.yaml", "r"
         ) as f:
             job_content = f.read()
     job = yaml.safe_load(job_content)
@@ -209,6 +211,10 @@ def create_pod(labels, with_deletion_timestamp=False):
             )
         ],
         phase=NodeStatus.RUNNING,
+        host_ip=f"{random.randint(0, 255)}"
+        f".{random.randint(0, 255)}"
+        f".{random.randint(0, 255)}"
+        f".{random.randint(0, 255)}",
     )
 
     resource = {"cpu": 1, "memory": "10Gi"}
@@ -228,6 +234,7 @@ def create_pod(labels, with_deletion_timestamp=False):
         containers=[container],
         restart_policy="Never",
         priority_class_name="high",
+        node_name="randomhost-" + str(random.randint(0, 1000)),
     )
 
     deletion_timestamp = (
@@ -317,7 +324,7 @@ def create_test_dataset_splitter(dataset_name="test"):
 
 
 def create_task_manager(dataset_name="test"):
-    task_manager = TaskManager(False, SpeedMonitor())
+    task_manager = TaskManager(False, PerfMonitor())
     splitter = create_test_dataset_splitter(dataset_name)
     task_manager.new_dataset(
         batch_size=10,
@@ -353,7 +360,7 @@ def mock_k8s_client():
     return k8s_client
 
 
-def start_local_master(port=12345):
+def start_local_master(port=None):
     job_args = LocalJobArgs("local", "default", "test")
     job_args.initilize()
     if not port:

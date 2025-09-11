@@ -12,24 +12,51 @@
 # limitations under the License.
 
 import json
+import os
+import sys
 import time
 import unittest
+from datetime import datetime
+from typing import List
 from unittest import mock
+from unittest.mock import MagicMock, Mock, patch
 
-from dlrover.python.common import grpc
+from dlrover.python.common import comm
+from dlrover.python.common.comm import (
+    BaseRequest,
+    BaseResponse,
+    DiagnosisAction,
+    HeartbeatResponse,
+)
 from dlrover.python.common.constants import (
+    CommunicationType,
+    NodeEnv,
     NodeEventType,
     NodeType,
     RendezvousName,
     TrainingExceptionLevel,
 )
-from dlrover.python.common.grpc import DiagnosisAction, HeartbeatResponse
+from dlrover.python.common.event.context import JobEventContext
+from dlrover.python.common.event.train_event import (
+    TrainEventName,
+    TrainEventState,
+)
+from dlrover.python.common.global_context import Context
 from dlrover.python.diagnosis.common.diagnosis_action import (
     EventAction,
     NoAction,
 )
-from dlrover.python.elastic_agent.master_client import build_master_client
+from dlrover.python.diagnosis.datacollector.atorch_event_collector import (
+    AtorchEventCollector,
+)
+from dlrover.python.elastic_agent.master_client import (
+    RayMasterClient,
+    build_master_client,
+)
 from dlrover.python.tests.test_utils import start_local_master
+from dlrover.python.training_event.event import EventTargetName, EventTypeName
+
+_event_context = JobEventContext.singleton_instance()
 
 
 class MasterClientTest(unittest.TestCase):
@@ -43,12 +70,12 @@ class MasterClientTest(unittest.TestCase):
     def test_open_channel(self):
         self.assertEqual(self._master_client._timeout, 1)
         self.assertEqual(self._master_client._timeout, 1)
-        self._master_client.close_channel()
-        self._master_client.open_channel()
+        self._master_client._close_grpc_channel()
+        self._master_client._open_grpc_channel()
 
     def test_report_used_resource(self):
-        gpu_stats: list[grpc.GPUStats] = [
-            grpc.GPUStats(
+        gpu_stats: List[comm.GPUStats] = [
+            comm.GPUStats(
                 index=0,
                 total_memory_mb=24000,
                 used_memory_mb=4000,
@@ -118,10 +145,15 @@ class MasterClientTest(unittest.TestCase):
         )
         self.assertTrue(res.success, True)
 
+        res = self._master_client.report_node_event(
+            NodeEventType.SUCCEEDED_EXITED, "SUCCEEDED_EXITED"
+        )
+        self.assertTrue(res.success, True)
+
         ts = int(time.time())
         self._master_client.report_global_step(100, ts)
 
-        model_info = grpc.ModelInfo()
+        model_info = comm.ModelInfo()
         self._master_client.report_model_info(model_info)
 
         success = self._master_client.join_sync("test-sync")
@@ -160,10 +192,33 @@ class MasterClientTest(unittest.TestCase):
 
         config = self._master_client.get_paral_config()
         if config:
-            self.assertIsInstance(config, grpc.ParallelConfig)
+            self.assertIsInstance(config, comm.ParallelConfig)
+
+    def test_kv_store(self):
+        self._master_client.kv_store_set("alpha", b"0")
+        self.assertEqual(self._master_client.kv_store_get("alpha"), b"0")
+        self._master_client.kv_store_add("beta", 1)
+        self.assertEqual(self._master_client.kv_store_get("beta"), 1)
+        self._master_client.kv_store_add("beta", 10)
+        self.assertEqual(self._master_client.kv_store_get("beta"), 11)
+
+        self.assertDictEqual(
+            self._master_client.kv_store_multi_get(["alpha", "beta"]),
+            {"alpha": b"0", "beta": 11},
+        )
+        self.assertDictEqual(
+            self._master_client.kv_store_multi_get(["omega"]), {}
+        )
+        self._master_client.kv_store_multi_set(
+            ["alpha", "beta", "gamma"], [b"0", b"100", b"200"]
+        )
+        self.assertDictEqual(
+            self._master_client.kv_store_multi_get(["alpha", "beta", "gamma"]),
+            {"alpha": b"0", "beta": b"100", "gamma": b"200"},
+        )
 
     def test_num_nodes_waiting(self):
-        rdzv_name = RendezvousName.ELASTIC_TRAINING
+        rdzv_name = RendezvousName.TRAINING
         num = self._master_client.num_nodes_waiting(rdzv_name)
         self.assertEqual(num, 0)
 
@@ -184,3 +239,194 @@ class MasterClientTest(unittest.TestCase):
         self._master_client._get = mock.MagicMock(return_value=response_dto)
         action = self._master_client.report_heart_beat(now)
         self.assertTrue(isinstance(action, EventAction))
+
+    def test_event_log(self):
+        _event_context.train_steps.clear_step_events()
+        _event_context.ckpt_steps.clear_step_events()
+
+        collector = AtorchEventCollector(
+            filepath="dlrover/python/tests/data/training_events",
+            local_world_size=1,
+            retry_timeout=1,
+        )
+        collector._client = self._master_client
+        collector.start_collectors()
+        time.sleep(1)
+        collector.stop_collectors()
+
+        self.assertEqual(_event_context.train_steps.size(), 2)
+        first_step = _event_context.train_steps.get_first_step_event()
+        last_step = _event_context.train_steps.get_last_step_event()
+        self.assertEqual(first_step.step, 177020)
+        self.assertEqual(last_step.step, 177021)
+
+        self.assertEqual(_event_context.ckpt_steps.size(), 2)
+        first_step = _event_context.ckpt_steps.get_first_step_event()
+        last_step = _event_context.ckpt_steps.get_last_step_event()
+        self.assertEqual(first_step.step, 177215)
+        self.assertEqual(last_step.step, 177413)
+
+    def test_report_atorch_events(self):
+        _event_context.train_steps.clear_step_events()
+        _event_context.ckpt_steps.clear_step_events()
+
+        now = int(datetime.now().timestamp())
+        self._master_client.report_atorch_event(
+            event_ts=now,
+            event_target=EventTargetName.TRAINER,
+            event_name=TrainEventName.TRAIN_EVT_STEP,
+            event_type=EventTypeName.BEGIN,
+            event_step=1,
+        )
+        last_step = _event_context.train_steps.get_last_step_event()
+        self.assertEqual(last_step.step, 1)
+        self.assertEqual(
+            last_step.event_state, TrainEventState.TRAIN_EVT_BEGIN
+        )
+        self.assertEqual(last_step.begin_timestamp, now)
+
+        self._master_client.report_atorch_event(
+            event_ts=now + 1,
+            event_target=EventTargetName.TRAINER,
+            event_name=TrainEventName.TRAIN_EVT_STEP,
+            event_type=EventTypeName.END,
+            event_step=1,
+        )
+        last_step = _event_context.train_steps.get_last_step_event()
+        self.assertEqual(last_step.step, 1)
+        self.assertEqual(
+            last_step.event_state, TrainEventState.TRAIN_EVT_BEGIN
+        )
+        self.assertEqual(last_step.begin_timestamp, now)
+
+        self._master_client.report_atorch_event(
+            event_ts=now + 1,
+            event_target=EventTargetName.TRAINER,
+            event_name=TrainEventName.TRAIN_EVT_STEP,
+            event_type=EventTypeName.END,
+            event_step=2,
+        )
+        last_step = _event_context.train_steps.get_last_step_event()
+        self.assertEqual(last_step.step, 2)
+        self.assertEqual(last_step.event_state, TrainEventState.TRAIN_EVT_END)
+        self.assertEqual(last_step.begin_timestamp, now)
+        self.assertEqual(last_step.end_timestamp, now + 1)
+        self.assertEqual(last_step.step_time, 1)
+
+        self._master_client.report_atorch_event(
+            event_ts=now + 5,
+            event_target=EventTargetName.TRAINER,
+            event_name=TrainEventName.TRAIN_EVT_STEP,
+            event_type=EventTypeName.BEGIN,
+            event_step=2,
+        )
+        self.assertEqual(_event_context.train_steps.size(), 2)
+
+        now = int(datetime.now().timestamp())
+        self._master_client.report_atorch_event(
+            event_ts=now + 100,
+            event_target=EventTargetName.TRAINER,
+            event_name=TrainEventName.TRAIN_EVT_FLASH_CKPT,
+            event_type=EventTypeName.BEGIN,
+            event_step=100,
+        )
+        self.assertEqual(_event_context.ckpt_steps.size(), 1)
+        last_step = _event_context.ckpt_steps.get_last_step_event()
+        self.assertEqual(last_step.step, 100)
+        self.assertEqual(
+            last_step.event_state, TrainEventState.TRAIN_EVT_BEGIN
+        )
+        self.assertEqual(last_step.begin_timestamp, now + 100)
+        self.assertEqual(last_step.end_timestamp, 0)
+
+        self._master_client.report_atorch_event(
+            event_ts=now + 150,
+            event_target=EventTargetName.TRAINER,
+            event_name=TrainEventName.TRAIN_EVT_FLASH_CKPT,
+            event_type=EventTypeName.END,
+            event_step=100,
+        )
+        self.assertEqual(_event_context.ckpt_steps.size(), 1)
+        last_step = _event_context.ckpt_steps.get_last_step_event()
+        self.assertEqual(last_step.step, 100)
+        self.assertEqual(last_step.event_state, TrainEventState.TRAIN_EVT_END)
+        self.assertEqual(last_step.begin_timestamp, now + 100)
+        self.assertEqual(last_step.end_timestamp, now + 150)
+        self.assertEqual(last_step.step_time, 50)
+
+
+class MasterClientBuildTest(unittest.TestCase):
+    def test_build_failure(self):
+        master_client = build_master_client("test", 1)
+        self.assertIsNone(master_client)
+
+
+class MasterHttpClientTest(unittest.TestCase):
+    def setUp(self) -> None:
+        os.environ[
+            NodeEnv.DLROVER_MASTER_SERVICE_TYPE
+        ] = CommunicationType.COMM_SERVICE_HTTP
+        context = Context.singleton_instance()
+        context.master_service_type = "http"
+        self._master, addr = start_local_master()
+        self._master_client = build_master_client(addr, 3)
+
+    def tearDown(self):
+        self._master.stop()
+        context = Context.singleton_instance()
+        context.master_service_type = "grpc"
+        os.environ.clear()
+
+    def test_http_client(self):
+        # get request
+        rdzv_name = RendezvousName.TRAINING
+        num = self._master_client.num_nodes_waiting(rdzv_name)
+        self.assertEqual(num, 0)
+
+        # report request
+        res = self._master_client.ready_for_ps_relaunch()
+        self.assertTrue(res.success)
+
+
+class MasterRayClientTest(unittest.TestCase):
+    def setUp(self) -> None:
+        os.environ[
+            NodeEnv.DLROVER_MASTER_SERVICE_TYPE
+        ] = CommunicationType.COMM_SERVICE_RAY
+        context = Context.singleton_instance()
+        context.master_service_type = "ray"
+        self._master_client = build_master_client(None, 3)
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        context = Context.singleton_instance()
+        context.master_service_type = "grpc"
+
+    @patch.dict("sys.modules", {"ray": None})
+    def test_ray_not_installed(self):
+        module = "dlrover.python.elastic_agent.master_client"
+        if module in sys.modules:
+            del sys.modules[module]
+
+        from dlrover.python.elastic_agent.master_client import RayMasterClient
+
+        self.assertIsNotNone(RayMasterClient("addr", 0, "worker"))
+
+    def test_ray_client(self):
+        self.assertIsNotNone(self._master_client)
+        self.assertTrue(isinstance(self._master_client, RayMasterClient))
+
+        self._master_client.register_master_actor("test")
+        self.assertEqual(self._master_client.master_actor_handle, "test")
+        self.assertFalse(self._master_client.get_elastic_run_config())
+
+        req = BaseRequest(node_id=0, node_type="test")
+        self._master_client.ray.get = Mock(return_value=True)
+        self._master_client._master_addr = MagicMock()
+        self._master_client._master_addr.agent_report.remote = MagicMock()
+        self.assertTrue(self._master_client._report(req))
+
+        rep = BaseResponse()
+        self._master_client.ray.get = Mock(return_value=rep)
+        self._master_client._master_addr.agent_get.remote = MagicMock()
+        self.assertFalse(self._master_client._get(req))

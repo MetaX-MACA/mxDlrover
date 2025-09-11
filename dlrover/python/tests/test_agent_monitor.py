@@ -18,8 +18,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from dlrover.python.common.comm import GPUStats
 from dlrover.python.common.constants import NodeEnv
-from dlrover.python.common.grpc import GPUStats
 from dlrover.python.elastic_agent.master_client import (
     MasterClient,
     build_master_client,
@@ -89,7 +89,7 @@ class ResourceMonitorTest(unittest.TestCase):
         reporter0.set_start_time()
         self.assertTrue(reporter0._start_time > 0)
         reporter0._last_timestamp = time.time() - 30
-        reporter0.report_resource_with_step(100)
+        reporter0.report_step(100)
 
 
 if __name__ == "__main__":

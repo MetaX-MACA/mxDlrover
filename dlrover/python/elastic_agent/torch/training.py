@@ -21,23 +21,15 @@ import socket
 import sys
 import tempfile
 import time
+import traceback
 import uuid
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import subprocess
-from typing import (
-    Any,
-    Callable,
-    DefaultDict,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 
 import psutil
 import torch
@@ -72,6 +64,7 @@ from torch.distributed.elastic.rendezvous import RendezvousParameters
 from torch.distributed.elastic.rendezvous.api import RendezvousHandler
 from torch.distributed.launcher.api import LaunchConfig, _get_entrypoint_name
 
+import dlrover.python.util.store_util as store_util
 from dlrover.python.common import env_utils
 from dlrover.python.common.constants import (
     Accelerators,
@@ -79,19 +72,17 @@ from dlrover.python.common.constants import (
     ConfigPath,
     JobConstant,
     NodeEnv,
-    NodeErrorMessage,
     NodeEventType,
+    NodeExitDescription,
     RendezvousName,
     TrainingExceptionLevel,
 )
 from dlrover.python.common.error import ProcessError
-from dlrover.python.common.grpc import (
-    find_free_port_for_hccl,
-    find_free_port_in_range,
-    find_free_port_in_set,
-)
 from dlrover.python.common.log import default_logger as logger
-from dlrover.python.diagnosis.common.constants import DiagnosisActionType
+from dlrover.python.diagnosis.common.constants import (
+    DiagnosisActionType,
+    DiagnosisConstant,
+)
 from dlrover.python.diagnosis.common.diagnosis_action import (
     DiagnosisAction,
     EventAction,
@@ -109,6 +100,12 @@ from dlrover.python.elastic_agent.master_client import MasterClient
 from dlrover.python.elastic_agent.monitor.training import TorchTrainingMonitor
 from dlrover.python.elastic_agent.torch.ckpt_saver import AsyncCheckpointSaver
 from dlrover.python.elastic_agent.torch.master_kv_store import MasterKVStore
+from dlrover.python.training_event import DLRoverAgentEvent
+from dlrover.python.util.common_util import (
+    find_free_port_for_hccl,
+    find_free_port_in_range,
+    find_free_port_in_set,
+)
 from dlrover.python.util.numa_util import get_gpu_affinity, get_npu_affinity
 from dlrover.python.util.time_util import timestamp_diff_in_seconds
 from dlrover.trainer.torch.utils import (
@@ -116,12 +113,16 @@ from dlrover.trainer.torch.utils import (
     version_less_than_240,
 )
 
+_agent_evt = DLRoverAgentEvent().singleton_instance()
+
+
 try:
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
 except (ModuleNotFoundError, ImportError):  # noqa: F841
     pass
 
 __all__ = ["launch_agent"]
+_DLROVER_TERMINAL_STATE_SYNC_ID = "torchelastic/agent/terminal_state"
 
 
 def _set_paral_config():
@@ -137,11 +138,33 @@ def _set_paral_config():
 def _get_local_ip():
     local_ip = os.getenv("POD_IP", "")
     if not local_ip:
-        local_ip = socket.gethostbyname(_get_fq_hostname())
+        try:
+            local_ip = socket.gethostbyname(_get_fq_hostname())
+        except socket.gaierror:
+            logger.warning(
+                "Can not resolve host IP. Use default '127.0.0.1' instead."
+            )
+            local_ip = "127.0.0.1"
     return local_ip
 
 
 class RendezvousOutSyncError(Exception):
+    pass
+
+
+class JobStoppingError(Exception):
+    pass
+
+
+class NodeCheckFailedError(RuntimeError):
+    pass
+
+
+class RendezvousTimeoutError(RuntimeError):
+    pass
+
+
+class StopWorkerTimeoutError(RuntimeError):
     pass
 
 
@@ -240,6 +263,18 @@ class ElasticLaunchConfig(LaunchConfig):
             self.network_check = True
             self.comm_perf_test = True
 
+    def to_json(self):
+        return {
+            "min_nodes": self.min_nodes,
+            "max_nodes": self.max_nodes,
+            "nproc_per_node": self.nproc_per_node,
+            "rdzv_backend": self.rdzv_backend,
+            "rdzv_endpoint": self.rdzv_endpoint,
+            "rdzv_configs": json.dumps(self.rdzv_configs),
+            "max_restarts": self.max_restarts,
+            "accelerator": self.accelerator,
+        }
+
 
 class MasterRendezvousHandler(RendezvousHandler):
     """The rendezvous handler completes rendezvous by connecting
@@ -287,7 +322,7 @@ class MasterRendezvousHandler(RendezvousHandler):
         )
         self.pend_timeout = float(rdzv_params.get("pend_timeout", "inf"))
         self._client = MasterClient.singleton_instance()
-        self._store = MasterKVStore(self._name, timedelta(seconds=60))
+        self._store = MasterKVStore(self._name, timedelta(seconds=300))
         lastcall_timeout = int(rdzv_params.get("lastcall_timeout", 60))
         node_unit = int(rdzv_params.get("node_unit", "1"))
         self._client.report_rdzv_params(
@@ -315,6 +350,7 @@ class MasterRendezvousHandler(RendezvousHandler):
         round = self._client.join_rendezvous(
             self._node_rank, self._local_world_size, rdzv_name=self._name
         )
+
         return round
 
     def next_rendezvous(self):
@@ -325,17 +361,26 @@ class MasterRendezvousHandler(RendezvousHandler):
         of it node ID in the world.
         """
         start_join = time.time()
-        node_name = os.getenv("POD_NAME", "")
+        node_name = os.getenv(NodeEnv.POD_NAME, "")
         msg = (
-            f"The node {node_name} with rank {self._node_rank} attempts to "
+            f"The node '{node_name}' with rank {self._node_rank} attempts to "
             f"join the next round of the rendezvous {self._name} "
             f"with timeout {self.join_timeout}."
         )
         logger.info(msg)
+        _rdzv_evt = _agent_evt.rendezvous(
+            rendezvous_type=self._name,
+            node_name=node_name,
+            node_rank=self._node_rank,
+            timeout=self.join_timeout,
+        )
+        _rdzv_evt.begin()
+
         self._join_rendezvous()
+
         start_pending = 0
         while True:
-            self._check_network_rdzv_for_elastic_training()
+            self._check_network_rdzv()
             round, group, world = self._client.get_comm_world(
                 self._name, self._node_rank
             )
@@ -349,14 +394,14 @@ class MasterRendezvousHandler(RendezvousHandler):
                             "and waits for more nodes."
                         )
                         start_pending = time.time()
-                    time.sleep(
-                        JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL
-                    )
+                    time.sleep(JobConstant.RENDEZVOUS_DEFAULT_INTERVAL)
                     start_join = time.time()
                     if start_join - start_pending > self.pend_timeout:
-                        raise TimeoutError(
+                        err_msg = (
                             f"Timeout {self.pend_timeout}s to wait more nodes"
                         )
+                        _rdzv_evt.fail(error=err_msg)
+                        raise RendezvousTimeoutError(err_msg)
                     continue
             elif time.time() - start_join > self.join_timeout:
                 timeout = self.join_timeout
@@ -367,8 +412,9 @@ class MasterRendezvousHandler(RendezvousHandler):
                 self._report_failure(
                     err_msg, level=TrainingExceptionLevel.RDZV_ERROR
                 )
-                raise TimeoutError(err_msg)
-            time.sleep(JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL)
+                _rdzv_evt.fail(error=err_msg)
+                raise RendezvousTimeoutError(err_msg)
+            time.sleep(JobConstant.RENDEZVOUS_DEFAULT_INTERVAL)
         rank = list(world.keys()).index(self._node_rank)
         world_size = len(world)
         logger.info(
@@ -377,25 +423,37 @@ class MasterRendezvousHandler(RendezvousHandler):
             f"{world_size}."
         )
         if (
-            self._name == RendezvousName.ELASTIC_TRAINING
+            self._name == RendezvousName.TRAINING
             and world_size < self._rdzv_params.max_nodes
         ):
             err_msg = f"Scale down the number of nodes to {world_size}"
             self._report_failure(err_msg, level=TrainingExceptionLevel.WARNING)
+
+        _rdzv_evt.success(
+            round=round,
+            rank=rank,
+            world_size=world_size,
+        )
         store = self._get_store(round, group)
         return store, world
 
-    def _check_network_rdzv_for_elastic_training(self):
-        """The worker need to exit the elastic-training rendezvous if there are
-        workers to join the network-check rendezvous.
+    def _check_network_rdzv(self):
         """
-        if self._name == RendezvousName.ELASTIC_TRAINING:
-            num = self._client.num_nodes_waiting(RendezvousName.NETWORK_CHECK)
+        1. The worker need to exit the elastic-training rendezvous if there are
+        workers to join the network-check rendezvous.
+        2. If job is stopping, raise exception and stop rendezvous
+        """
+        num = self._client.num_nodes_waiting(RendezvousName.NETWORK_CHECK)
+
+        if self._name == RendezvousName.TRAINING:
             if num > 0:
                 raise RendezvousOutSyncError(
                     "Some workers join the network-check rendezvous"
                     "not the elastic-training rendezvous."
                 )
+
+        if num < 0:
+            raise JobStoppingError("Exit rendezvous when job is stopping")
 
     def _report_failure(self, err_msg, level):
         if self._node_rank == 0:
@@ -405,7 +463,7 @@ class MasterRendezvousHandler(RendezvousHandler):
         key_prefix = f"torch.rendezvous.{self._name}.{round}.{group}"
         return PrefixStore(key_prefix, self._store)
 
-    def num_nodes_waiting(self) -> int:
+    def num_nodes_waiting(self):
         return self._client.num_nodes_waiting(self._name)
 
     def get_run_id(self) -> str:
@@ -487,7 +545,10 @@ class ElasticTrainingAgent(LocalElasticAgent):
 
         if with_diagnostician:
             self._diagnose_agent = DiagnosisAgent.singleton_instance(
-                training_log_file, failure_node_errors, node_rank
+                training_log_file=training_log_file,
+                errors=failure_node_errors,
+                node_rank=node_rank,
+                local_world_size=config.nproc_per_node,
             )
         self._agent_context = get_agent_context()
         self._rank_cpu_affinity = {}
@@ -567,10 +628,8 @@ class ElasticTrainingAgent(LocalElasticAgent):
         worker_group.store = store
         worker_group.group_rank = group_rank
         worker_group.group_world_size = group_world_size
-
         if group_rank == 0:
             spec.master_port = self._get_free_port()
-
             if hasattr(spec, "local_addr"):
                 self._set_master_addr_port(
                     store,
@@ -715,6 +774,31 @@ class ElasticTrainingAgent(LocalElasticAgent):
             free_port = find_free_port_in_range(20000, 30000)
         return free_port
 
+    def _get_ranks(
+        self,
+        role_infos: List[_RoleInstanceInfo],
+        role_idx: int,
+        start_idx: int = 0,
+        end_idx: int = -1,
+    ) -> Tuple[int, List[int]]:
+        if end_idx == -1:
+            end_idx = len(role_infos)
+        prefix_sum = 0
+        total_sum = 0
+        for idx in range(start_idx, end_idx):
+            if role_idx > idx:
+                prefix_sum += role_infos[idx].local_world_size
+            total_sum += role_infos[idx].local_world_size
+        return (
+            total_sum,
+            list(
+                range(
+                    prefix_sum,
+                    prefix_sum + role_infos[role_idx].local_world_size,
+                )
+            ),
+        )
+
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
     @prof
@@ -750,117 +834,46 @@ class ElasticTrainingAgent(LocalElasticAgent):
             role_infos.append(role_info)
         group_rank = nodes.index(node_id)
 
-        if version_less_than_240():
-            my_role_info = role_infos[group_rank]
-            worker_world_size, worker_global_ranks = self._get_ranks(
-                role_infos, group_rank
+        my_role_info = role_infos[group_rank]
+        worker_world_size, worker_global_ranks = self._get_ranks(
+            role_infos, group_rank
+        )
+        role_infos = sorted(
+            role_infos, key=functools.cmp_to_key(_RoleInstanceInfo.compare)
+        )
+        (
+            role_start_idx,
+            role_end_idx,
+        ) = _RoleInstanceInfo.find_role_boundaries(
+            role_infos, my_role_info.role
+        )
+        role_pos = next(
+            idx
+            for idx, role_info in enumerate(role_infos)
+            if _RoleInstanceInfo.compare(role_info, my_role_info) == 0
+        )
+        role_world_size, role_ranks = self._get_ranks(
+            role_infos, role_pos, role_start_idx, role_end_idx + 1
+        )
+        workers = []
+        for ind in range(spec.local_world_size):
+            worker = Worker(
+                local_rank=ind,
+                global_rank=worker_global_ranks[ind],
+                role_rank=role_ranks[ind],
+                world_size=worker_world_size,
+                role_world_size=role_world_size,
             )
-            role_infos = sorted(
-                role_infos, key=functools.cmp_to_key(_RoleInstanceInfo.compare)
-            )
-            (
-                role_start_idx,
-                role_end_idx,
-            ) = _RoleInstanceInfo.find_role_boundaries(
-                role_infos, my_role_info.role
-            )
-            role_pos = next(
-                idx
-                for idx, role_info in enumerate(role_infos)
-                if _RoleInstanceInfo.compare(role_info, my_role_info) == 0
-            )
-            role_world_size, role_ranks = self._get_ranks(
-                role_infos, role_pos, role_start_idx, role_end_idx + 1
-            )
-            workers = []
-            for ind in range(spec.local_world_size):
-                worker = Worker(
-                    local_rank=ind,
-                    global_rank=worker_global_ranks[ind],
-                    role_rank=role_ranks[ind],
-                    world_size=worker_world_size,
-                    role_world_size=role_world_size,
-                )
-                workers.append(worker)
-        else:
-            group_world_size = len(world)
-
-            ROLE_INFO_PREFIX = "torchelastic/role_info/"
-            ASSIGNED_RANKS_PREFIX = "torchelastic/assigned_ranks/"
-
-            agent_role_info = _RoleInstanceInfo(
-                spec.role, group_rank, spec.local_world_size
-            )
-            self._store.set(
-                f"{ROLE_INFO_PREFIX}{group_rank}", agent_role_info.serialize()
-            )
-
-            if group_rank == 0:
-                role_infos_bytes = self._store.multi_get(
-                    [
-                        f"torchelastic/role_info/{i}"
-                        for i in range(group_world_size)
-                    ]
-                )
-                role_infos = [
-                    _RoleInstanceInfo.deserialize(info_bytes)
-                    for info_bytes in role_infos_bytes
-                ]
-
-                role_sizes: DefaultDict[str, int] = defaultdict(lambda: 0)
-                global_size = 0
-                for role_info in role_infos:
-                    role_sizes[role_info.role] += role_info.local_world_size
-                    global_size += role_info.local_world_size
-
-                base_global_rank = 0
-                role_ranks = defaultdict(lambda: 0)
-
-                keys = []
-                values = []
-                for i, role_info in enumerate(role_infos):
-                    keys.append(f"{ASSIGNED_RANKS_PREFIX}{i}")
-                    values.append(
-                        json.dumps(
-                            [
-                                base_global_rank,
-                                global_size,
-                                role_ranks[role_info.role],
-                                role_sizes[role_info.role],
-                            ]
-                        )
-                    )
-
-                    base_global_rank += role_info.local_world_size
-                    role_ranks[role_info.role] += role_info.local_world_size
-
-                self._store.multi_set(keys, values)
-
-            # get will block until the data is available in the store.
-            (
-                base_global_rank,
-                global_world_size,
-                base_role_rank,
-                role_world_size,
-            ) = json.loads(
-                self._store.get(f"{ASSIGNED_RANKS_PREFIX}{group_rank}")
-            )
-
-            workers = []
-            for local_rank in range(spec.local_world_size):
-                worker = Worker(
-                    local_rank=local_rank,
-                    global_rank=base_global_rank + local_rank,
-                    role_rank=base_role_rank + local_rank,
-                    world_size=global_world_size,
-                    role_world_size=role_world_size,
-                )
-                workers.append(worker)
+            workers.append(worker)
         return workers
 
-    def _initialize_workers(self, worker_group):
-        logger.info("Start initializing training workers.")
+    def _initialize_workers(self, worker_group, max_errors=3):
+        logger.info(
+            "Start initializing "
+            f"training({self.__class__.__name__}) workers."
+        )
         start_pending = 0
+        err_cnt = 0
         pend_timeout = float(
             self._config.rdzv_configs.get("pend_timeout", "inf")
         )
@@ -882,7 +895,28 @@ class ElasticTrainingAgent(LocalElasticAgent):
                     )
                 time.sleep(JobConstant.TRAINING_AGENT_LOOP_DEFAULT_INTERVAL)
                 if time.time() - start_pending > pend_timeout:
-                    raise TimeoutError("Timeout to wait for new nodes.")
+                    raise RendezvousTimeoutError(
+                        "Timeout to wait for new nodes."
+                    )
+            except (
+                NodeCheckFailedError,
+                RendezvousTimeoutError,
+                StopWorkerTimeoutError,
+                JobStoppingError,
+            ) as e:
+                raise e
+            except Exception as e:
+                err_cnt += 1
+                if err_cnt < max_errors:
+                    stack_trace = traceback.format_exc()
+                    logger.error(
+                        f"Unexpected exception in _initialize_workers: {e}\n"
+                        f"Stack backtrace:\n {stack_trace}"
+                    )
+                    self._stop_workers(worker_group)
+                    continue
+                else:
+                    raise e
             else:
                 logger.info("Finish initializing training workers.")
                 break
@@ -904,14 +938,14 @@ class ElasticTrainingAgent(LocalElasticAgent):
                     super()._stop_workers(worker_group, is_restart)
 
             signal.alarm(0)
-        except TimeoutError as te:
+        except StopWorkerTimeoutError as te:
             logger.error(str(te))
-            raise
+            raise te
         finally:
             signal.alarm(0)
 
     def _stop_timeout_handler(self, signum, frame):
-        raise TimeoutError("Timed out waiting for stopping workers.")
+        raise StopWorkerTimeoutError("Timed out waiting for stopping workers.")
 
     def _set_numa_affinity(self):
         """set numa affinity to workers processes,
@@ -978,7 +1012,6 @@ class ElasticTrainingAgent(LocalElasticAgent):
         while True:
             assert self._worker_group.state != WorkerState.INIT
             time.sleep(monitor_interval)
-
             self._check_and_process_diagnosis_action()
             try:
                 run_result: RunResult = self._monitor_workers(
@@ -1002,7 +1035,10 @@ class ElasticTrainingAgent(LocalElasticAgent):
                 )
 
                 try:
-                    self._exit_barrier()
+                    if version_less_than_240():
+                        self._dlrover_exit_barrier()
+                    else:
+                        self._exit_barrier()
                     logger.info("Barrier exited.")
 
                     self._wait_async_saver()
@@ -1012,6 +1048,11 @@ class ElasticTrainingAgent(LocalElasticAgent):
                 finally:
                     self._client.report_succeeded_exited()
                     logger.info("Succeeded and exit.")
+                    _agent_evt.process_succeeded(
+                        node_rank=self._node_rank,
+                        return_values=f"{run_result.return_values}",
+                        state=f"{run_result.state.name}",
+                    )
 
                 return run_result
             elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED}:
@@ -1030,18 +1071,54 @@ class ElasticTrainingAgent(LocalElasticAgent):
                     logger.warning(f"Failed to diagnose errors: {e}")
                     if self._remaining_failovers > 0:
                         action = NodeAction(
+                            node_id=env_utils.get_node_id(),
+                            node_type=env_utils.get_node_type(),
+                            instance=DiagnosisConstant.LOCAL_INSTANCE,
                             action_type=DiagnosisActionType.RESTART_WORKER,
                         )
                     else:
                         action = NodeAction(
+                            node_id=env_utils.get_node_id(),
+                            node_type=env_utils.get_node_type(),
+                            instance=DiagnosisConstant.LOCAL_INSTANCE,
                             action_type=DiagnosisActionType.RELAUNCH_WORKER,
                         )
+
+                if action.action_type == DiagnosisActionType.RESTART_WORKER:
+                    _agent_evt.process_restart(
+                        node_rank=self._node_rank,
+                        restart_count=self._restart_count,
+                        remaining_restarts=self._remaining_failovers,
+                        state=f"{run_result.state.name}",
+                        return_values=f"{run_result.return_values}",
+                        failures=f"{run_result.failures}",
+                    )
+                elif action.action_type == DiagnosisActionType.RELAUNCH_WORKER:
+                    _agent_evt.process_fail(
+                        node_rank=self._node_rank,
+                        restart_count=self._restart_count,
+                        remaining_restarts=self._remaining_failovers,
+                        state=f"{run_result.state.name}",
+                        return_values=f"{run_result.return_values}",
+                        failures=f"{run_result.failures}",
+                    )
+
                 self._process_diagnosis_action(action)
+
                 if self._worker_group.state == WorkerState.FAILED:
                     return run_result
+
             elif state == WorkerState.HEALTHY:
                 # membership changes do not count as retries
                 if self._membership_changed(role, rdzv_handler):
+                    _agent_evt.process_restart_membership(
+                        node_rank=self._node_rank,
+                        restart_count=self._restart_count,
+                        remaining_restarts=self._remaining_failovers,
+                        state=f"{run_result.state.name}",
+                        return_values=f"{run_result.return_values}",
+                        failures=f"{run_result.failures}",
+                    )
                     self._save_ckpt_to_storage()
                     self._restart_workers(self._worker_group)
             else:
@@ -1051,9 +1128,22 @@ class ElasticTrainingAgent(LocalElasticAgent):
         if isinstance(action, NodeAction):
             action.__class__ = NodeAction
             if action.action_type == DiagnosisActionType.RESTART_WORKER:
-                self._remaining_failovers -= 1
+                logger.info(
+                    f"Process diagnosis action: "
+                    f"{action.action_type} {action.instance}"
+                )
+                if action.instance == DiagnosisConstant.LOCAL_INSTANCE:
+                    self._remaining_failovers -= 1
+                    logger.info(
+                        f"Decrement remaining FO to "
+                        f"{self._remaining_failovers}"
+                    )
                 self._restart_workers(self._worker_group)
             elif action.action_type == DiagnosisActionType.RELAUNCH_WORKER:
+                logger.info(
+                    f"Process diagnosis action: "
+                    f"{action.action_type} {action.instance}"
+                )
                 self._stop_workers(self._worker_group)
                 self._worker_group.state = WorkerState.FAILED
         elif isinstance(action, EventAction):
@@ -1070,24 +1160,29 @@ class ElasticTrainingAgent(LocalElasticAgent):
             )
 
     def _check_and_process_diagnosis_action(self):
-        action = self._agent_context.next_diagnosis_action()
-        if isinstance(action, NoAction):
-            return
-        self._process_diagnosis_action(action)
-        # avoid to execute the same event action too frequently
-        if isinstance(action, EventAction) and not action.is_expired():
-            time_diff = timestamp_diff_in_seconds(
-                action.timestamp, datetime.now().timestamp()
-            )
-            expired_time_period = action.expired_time_period - time_diff
-            if expired_time_period < 0:
-                expired_time_period = 0
-            action.update_timestamp(
-                timestamp=datetime.now().timestamp(),
-                expired_time_period=expired_time_period,
-                executable_time_period=expired_time_period + 60,
-            )
-            self._agent_context.enqueue_diagnosis_action(action)
+        for instance in [
+            DiagnosisConstant.LOCAL_INSTANCE,
+            DiagnosisConstant.ANY_INSTANCE,
+        ]:
+            action = self._agent_context.next_diagnosis_action(instance)
+            if isinstance(action, NoAction):
+                continue
+            logger.info(f"Start processing diagnosis action: {action}")
+            self._process_diagnosis_action(action)
+            # avoid to execute the same event action too frequently
+            if isinstance(action, EventAction) and not action.is_expired():
+                time_diff = timestamp_diff_in_seconds(
+                    action.timestamp, datetime.now().timestamp()
+                )
+                expired_time_period = action.expired_time_period - time_diff
+                if expired_time_period < 0:
+                    expired_time_period = 0
+                action.update_timestamp(
+                    timestamp=datetime.now().timestamp(),
+                    expired_time_period=expired_time_period,
+                    executable_time_period=expired_time_period + 60,
+                )
+                self._agent_context.enqueue_diagnosis_action(action)
 
     def _wait_async_saver(self):
         """
@@ -1149,7 +1244,7 @@ class ElasticTrainingAgent(LocalElasticAgent):
     def _restart_workers(self, worker_group: WorkerGroup):
         self._restart_count += 1
         self._remaining_restarts -= 1
-        # Relase the shared memory lock before starting workers.
+        # Release the shared memory lock before starting workers.
         AsyncCheckpointSaver.reset()
         super()._restart_workers(worker_group)
 
@@ -1175,7 +1270,9 @@ class ElasticTrainingAgent(LocalElasticAgent):
         """Shutdown the executor to save the checkpoint."""
         self._save_ckpt_executor.shutdown(wait=False)
 
-    def sync_training_ports(self, interval=20):
+    def sync_training_ports(
+        self, interval=JobConstant.SYNC_PORTS_DEFAULT_INTERVAL
+    ):
         logger.info(f"Accelerator: {self._config.accelerator}")
         if (
             self._config.accelerator == Accelerators.ASCEND_NPU
@@ -1222,6 +1319,33 @@ class ElasticTrainingAgent(LocalElasticAgent):
                     start_port = resp.newport
                     port = 0
 
+    def _dlrover_exit_barrier(self):
+        logger.info(
+            f"Local worker group finished {self._worker_group.state}. "
+            f"Waiting {self._exit_barrier_timeout} seconds "
+            f"for other agents to finish"
+        )
+        start = time.time()
+        try:
+            store_util.barrier(
+                self._store,
+                self._worker_group.group_world_size,
+                key_prefix=_DLROVER_TERMINAL_STATE_SYNC_ID,
+                barrier_timeout=self._exit_barrier_timeout,
+            )
+            logger.info(
+                f"Done waiting for other agents. Elapsed: "
+                f"{time.time() - start} seconds"
+            )
+        except SignalException as e:
+            logger.warning(f"Got termination signal: {e.sigval}")
+            raise
+        except Exception:
+            logger.error(
+                f"Error waiting on exit barrier. Elapsed: "
+                f"{time.time() - start} seconds"
+            )
+
 
 def launch_agent(
     config: ElasticLaunchConfig,
@@ -1255,16 +1379,18 @@ def launch_agent(
         f"  training_log     : {config.training_log_file}\n"
         f"  failure_errors   : {config.failure_node_errors}\n"
         f"  numa_affinity    : {config.numa_affinity}\n"
+        f"  accelerator      : {config.accelerator}\n"
     )
 
-    _set_paral_config()
+    _agent_evt.start(args=vars(config))
 
+    _set_paral_config()
     monitor = TorchTrainingMonitor(ConfigPath.RUNTIME_METRICS)
     monitor.start()
 
     spec = _create_worker_spec(
         node_rank=node_rank,
-        rdzv_name=RendezvousName.ELASTIC_TRAINING,
+        rdzv_name=RendezvousName.TRAINING,
         config=config,
         entrypoint=entrypoint,
         args=args,
@@ -1278,10 +1404,13 @@ def launch_agent(
         log_dir=config.log_dir,
         training_log_file=config.training_log_file,
         failure_node_errors=config.failure_node_errors,
+        exit_barrier_timeout=900,
     )
 
     shutdown_rdzv = True
+    is_node_check_failed = False
     result = None
+
     try:
         metrics.initialize_metrics(metrics.MetricsConfig(config.metrics_cfg))
 
@@ -1300,6 +1429,7 @@ def launch_agent(
                 failures=result.failures,
             )
 
+        _agent_evt.exit(success=True)
         return result.return_values
     except ChildFailedError:
         raise
@@ -1310,17 +1440,41 @@ def launch_agent(
         shutdown_rdzv = False
         events.record(agent.get_event_failed())
         raise
+    except NodeCheckFailedError:
+        is_node_check_failed = True
+        raise
     except Exception:
         events.record(agent.get_event_failed())
         raise
     finally:
         exc_type, exc_value, exc_traceback = sys.exc_info()
         client = MasterClient.singleton_instance()
-        if (exc_type is not None) or (
-            result is not None and result.is_failed()
-        ):
+        if (
+            (exc_type is not None)
+            or (result is not None and result.is_failed())
+        ) and not is_node_check_failed:
             client.report_failed_exited()
             logger.info("Failed and exit.")
+        elif is_node_check_failed:
+            logger.info("Node check failed and exit.")
+
+        if result is None:
+            _agent_evt.exit(
+                success=False,
+                exc_type=f"{exc_type}",
+                exc_value=f"{exc_value}",
+                exc_traceback=f"{exc_traceback}",
+            )
+        else:
+            _agent_evt.exit(
+                success=False,
+                exc_type=f"{exc_type}",
+                exc_value=f"{exc_value}",
+                exc_traceback=f"{exc_traceback}",
+                state=f"{result.state.name}",
+                return_values=f"{result.return_values}",
+                failures=f"{result.failures}",
+            )
 
         if shutdown_rdzv:
             spec.rdzv_handler.shutdown()
@@ -1409,6 +1563,12 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
         self._check_round = check_round
         self._config: ElasticLaunchConfig = config
 
+    def network_check_evt(self, round, node_rank):
+        return _agent_evt.network_check(
+            round=round,
+            node_rank=node_rank,
+        )
+
     def _get_check_node_timeout(self):
         return JobConstant.MASTER_CLIENT_CHECK_NODE_TIMEOUT
 
@@ -1424,6 +1584,9 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
         fault_nodes = []
         stragglers = []
         for i in range(self._check_round):
+            evt = self.network_check_evt(i, self._node_rank)
+            evt.begin()
+
             result, elapsed_time = self._run_node_check(
                 timeout=JobConstant.NODE_CHECK_TIMEOUT
             )
@@ -1432,9 +1595,11 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
                 f"Network check time of round {i} is {elapsed_time}"
                 f" and succeed is {result}."
             )
+
+            success = success or result
             status = (
                 NodeEventType.NODE_CHECK_SUCCEEDED
-                if result
+                if success
                 else NodeEventType.NODE_CHECK_FAILED
             )
             self._client.report_network_check_status(
@@ -1442,7 +1607,19 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
                 status,
                 elapsed_time,
             )
-            success = success or result
+            if success:
+                evt.success(
+                    result=f"{result}",
+                    status=f"{status}",
+                    elapsed_time=f"{elapsed_time}",
+                )
+            else:
+                evt.fail(
+                    result=f"{result}",
+                    status=f"{status}",
+                    elapsed_time=f"{elapsed_time}",
+                )
+
             fault_nodes, fault_reason = self._client.check_fault_node(
                 timeout=self._get_check_node_timeout()
             )
@@ -1464,7 +1641,9 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
                         "No need for another round of network "
                         "check because the nodes is less than 3."
                     )
-                    raise RuntimeError("This node is down.")
+                    raise NodeCheckFailedError(
+                        NodeExitDescription.CHECK_FAILED_MSG
+                    )
                 else:
                     # Run the next round check to detect the fault node.
                     time.sleep(JobConstant.NODE_CHECK_NEXT_ROUND_TIMEOUT)
@@ -1474,14 +1653,16 @@ class NodeCheckElasticAgent(ElasticTrainingAgent):
 
         if self._node_rank in fault_nodes:
             self._client.report_failures(
-                NodeErrorMessage.NETWORKER_ERROR,
+                NodeEventType.NODE_CHECK_FAILED,
                 level=TrainingExceptionLevel.NODE_ERROR,
             )
-            raise RuntimeError("This node is down.")
+            raise NodeCheckFailedError(NodeExitDescription.CHECK_FAILED_MSG)
         elif self._node_rank in stragglers:
             logger.warning("This node is a straggler!")
             if self._config.exclude_straggler:
-                raise RuntimeError("The node is a straggler and exits.")
+                raise NodeCheckFailedError(
+                    "The node is a straggler and exits."
+                )
         return success
 
     def _run_node_check(self, monitor_interval=3, timeout=300):
@@ -1684,7 +1865,7 @@ def comm_perf_check(
         config,
         entrypoint,
         args,
-        RendezvousName.ELASTIC_TRAINING,
+        RendezvousName.TRAINING,
         check_round=1,
     )
 
@@ -1709,13 +1890,14 @@ def run_network_check(config: ElasticLaunchConfig, entrypoint):
         env_conf += "MCCL_DISABLE_OPTIC_LINK=1"
         os.environ['NCCL_SETTINGS'] = env_conf
 
-    for _ in range(2):
+    for _round in range(2):
         # If network fails because other abnormal node, We
         # will retry to check network after the new node is starting.
         # DLRover will replace the abnormal node with a new node.
         success = node_health_check(
             config=config, entrypoint=entrypoint, args=cmd_args
         )
+
         if success:
             break
         else:
