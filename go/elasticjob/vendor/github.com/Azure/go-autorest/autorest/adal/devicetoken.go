@@ -1,5 +1,5 @@
 package adal
-// 2024-Modified by MetaX Integrated Circuits (Shanghai)Co., Ltd.All Rights Reserved.
+
 // Copyright 2017 Microsoft Corporation
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");

@@ -133,4 +133,25 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
+
+# 生成客户端代码
+.PHONY: generate-client
+generate-client:
+	@echo "生成客户端代码..."
+	chmod +x hack/update-codegen.sh
+	./hack/update-codegen.sh
+	go mod tidy
+
+# 验证生成的代码
+.PHONY: verify-client
+verify-client:
+	@echo "验证生成的客户端代码..."
+	$(MAKE) generate-client
+	git diff --exit-code go/client/ || (echo "请运行 'make generate-client' 并提交生成的代码"; exit 1)
+
+# 集成到现有的 generate 目标
+generate: generate-client
+
+# 集成到现有的 verify 目标
+verify: verify-client
 	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
